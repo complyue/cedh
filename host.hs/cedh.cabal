@@ -1,0 +1,106 @@
+cabal-version:      2.4
+name:               cedh
+version:            0.1.0.0
+license:            BSD-3-Clause
+copyright:          Compl Yue
+maintainer:         compl.yue@icloud.com
+author:             Compl Yue
+stability:          experimental
+homepage:           https://github.com/e-wrks/cedh
+bug-reports:        https://github.com/e-wrks/cedh/issues
+synopsis:           Currying Edh
+description:
+  Please see the README on Github at <https://github.com/e-wrks/cedh>
+
+category:           Scripting,Language
+build-type:         Simple
+extra-source-files: README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/e-wrks/cedh
+  subdir:   host.hs
+
+library
+  exposed-modules:    Language.Edh.Curry
+  other-modules:
+    Language.Edh.Curry.Comput
+  hs-source-dirs:     src
+  default-language:   Haskell2010
+  default-extensions:
+    NoImplicitPrelude
+    BangPatterns
+    ConstraintKinds
+    DataKinds
+    FlexibleContexts
+    FlexibleInstances
+    GADTs
+    KindSignatures
+    LambdaCase
+    OverloadedStrings
+    ScopedTypeVariables
+    TupleSections
+    TypeApplications
+    TypeOperators
+    ViewPatterns
+
+  ghc-options:        -Wall
+  build-depends:
+  build-depends:
+    , base                  >=4.12
+    , bytestring
+    , containers
+    , edh
+    , hashable
+    , lossless-decimal
+    , mtl
+    , stm                   >=2.5
+    , text
+    , transformers
+    , unordered-containers
+
+executable cedh
+  main-is:            Main.hs
+  hs-source-dirs:     runmodu
+  other-modules:      Repl
+  default-language:   Haskell2010
+  default-extensions:
+    NoImplicitPrelude
+    BangPatterns
+    ConstraintKinds
+    DataKinds
+    FlexibleContexts
+    FlexibleInstances
+    GADTs
+    KindSignatures
+    LambdaCase
+    OverloadedStrings
+    ScopedTypeVariables
+    TupleSections
+    TypeApplications
+    TypeOperators
+    ViewPatterns
+
+  -- more HECs usually result in worse performance in shared cloud computing
+  -- environments, e.g. a Gitpod workspace exposes 16 cores to the VM, but
+  -- those hardware threads are mostly busy doing some jobs for the others,
+  -- attempts to leverage more of them will be losing (up to 15x slower),
+  -- possibly due to extra waiting time & scheduling overhead.
+  --
+  -- but multi-cores are the norm for event distribution & hosting, which is
+  -- our purpose.
+  --
+  -- custom interpreters can be built on purpose with more HECs enabled, but
+  -- pay attention to https://github.com/commercialhaskell/stack/issues/680
+  -- which suggests -N >=32 is always a bad idea
+  ghc-options:        -Wall -threaded -rtsopts "-with-rtsopts=-maxN3 -qg"
+  build-depends:
+    , base              >=4.12
+    , bytestring
+    , edh
+    , lossless-decimal
+    , mtl
+    , cedh
+    , stm               >=2.5
+    , text
+    , transformers
