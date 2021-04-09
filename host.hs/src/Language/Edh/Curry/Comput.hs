@@ -188,6 +188,32 @@ performHostArg' !typeName !argName !effDefault =
                 _ -> badArg
               _ -> badArg
 
+computArgDefault ::
+  forall t. Typeable t => Object -> (((EdhValue, t) -> EdhTx) -> EdhTx)
+computArgDefault = computArgDefault' []
+
+computArgDefault' ::
+  forall t.
+  Typeable t =>
+  [EdhValue] ->
+  Object ->
+  (((EdhValue, t) -> EdhTx) -> EdhTx)
+computArgDefault' = flip computArgDefault'' []
+
+computArgDefault'' ::
+  forall t.
+  Typeable t =>
+  [EdhValue] ->
+  [(AttrKey, EdhValue)] ->
+  Object ->
+  (((EdhValue, t) -> EdhTx) -> EdhTx)
+computArgDefault'' !args !kwargs !clsComput !exit =
+  constructComput'' args kwargs clsComput $ \(!obj, !thunk) -> case thunk of
+    Effected !effected -> case fromDynamic effected of
+      Just (d :: t) -> exit (EdhObject obj, d)
+      Nothing -> error "bug: wrong host type constructed from a comput class"
+    _ -> error "bug: a comput class based default arg value ctor not effecting"
+
 -- | The thunk of a computation can be in 3 different stages:
 -- - Unapplied
 --   - Only partial formal arguments have been collected,
