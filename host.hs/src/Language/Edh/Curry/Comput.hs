@@ -110,7 +110,17 @@ performDoubleArg' !anno !argName !effDefault =
               _ -> badArg
 
 appliedHostArg :: forall t. Typeable t => AnnoText -> AttrKey -> AppliedArg
-appliedHostArg !typeName !argName = AppliedArg typeName argName $
+appliedHostArg !typeName !argName = appliedHostArg' @t typeName argName $
+  \_obj !d !exit -> exitEdhTx exit $ toDyn d
+
+appliedHostArg' ::
+  forall t.
+  Typeable t =>
+  AnnoText ->
+  AttrKey ->
+  (Object -> t -> EdhTxExit Dynamic -> EdhTx) ->
+  AppliedArg
+appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
   \ !ets !val !exit -> do
     let badArg = edhValueDesc ets val $ \ !badDesc ->
           throwEdh ets UsageError $
@@ -121,11 +131,13 @@ appliedHostArg !typeName !argName = AppliedArg typeName argName $
           Just !comput ->
             case comput'thunk comput of
               Effected !effected -> case fromDynamic effected of
-                Just (_ :: t) -> exit effected
+                Just (d :: t) -> runEdhTx ets $
+                  dmap obj d $ \ !dd' _ets -> exit dd'
                 Nothing -> badArg
               Applied !applied | null (comput'effectful'args comput) ->
                 case fromDynamic applied of
-                  Just (_ :: t) -> exit applied
+                  Just (d :: t) -> runEdhTx ets $
+                    dmap obj d $ \ !dd' _ets -> exit dd'
                   Nothing -> badArg
               _ -> edhValueDesc ets val $ \ !badDesc ->
                 throwEdh ets UsageError $
@@ -133,7 +145,8 @@ appliedHostArg !typeName !argName = AppliedArg typeName argName $
                     <> " not effected, it is: "
                     <> badDesc
           Nothing -> case fromDynamic dd of
-            Just (_ :: t) -> exit dd
+            Just (d :: t) -> runEdhTx ets $
+              dmap obj d $ \ !dd' _ets -> exit dd'
             Nothing -> badArg
         _ -> badArg
       _ -> badArg
@@ -518,27 +531,23 @@ createComputClass
 
       reprProc :: ArgsPack -> EdhHostProc
       reprProc _ !exit !ets = withThisHostObj ets $
-        \(Comput !thunk !appliedArgs effArgs) ->
-          seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
-            case thunk of
-              Unapplied {} ->
+        \(Comput _thunk !appliedArgs effArgs) -> do
+          let withEffsPart :: (Text -> STM ()) -> STM ()
+              withEffsPart !exit' = case effArgs of
+                [] -> exit' ""
+                _ -> seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
+                  exit' $ " {# " <> T.unwords effsRepr <> " #}"
+
+          withEffsPart $ \ !effsPart -> case appliedArgs of
+            [] ->
+              exitEdh ets exit $
+                EdhString $
+                  clsName <> "()" <> effsPart
+            _ ->
+              seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
                 exitEdh ets exit $
                   EdhString $
-                    clsName <> "( " <> T.unwords argReprs <> " )\n"
-              Applied {} ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      clsName <> "( " <> T.unwords argReprs <> " ) {# "
-                        <> T.unwords effsRepr
-                        <> " #}"
-              Effected {} ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      clsName <> "( " <> T.unwords argReprs <> " ) {# "
-                        <> T.unwords effsRepr
-                        <> " #}"
+                    clsName <> "( " <> T.unwords argReprs <> " )" <> effsPart
         where
           appliedRepr ::
             (AppliedArg, Maybe (EdhValue, Dynamic)) ->
