@@ -7,8 +7,10 @@ import Control.Monad
 import Data.Dynamic
 import qualified Data.Lossless.Decimal as D
 import Data.Maybe
+import Data.Proxy
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Typeable
 import Data.Unique
 import GHC.Conc (unsafeIOToSTM)
 import Language.Edh.EHI
@@ -109,9 +111,11 @@ performDoubleArg' !anno !argName !effDefault =
                 exit (val, toDyn (fromRational (toRational d) :: Double))
               _ -> badArg
 
-appliedHostArg :: forall t. Typeable t => AnnoText -> AttrKey -> AppliedArg
-appliedHostArg !typeName !argName = appliedHostArg' @t typeName argName $
+appliedHostArg :: forall t. Typeable t => AttrKey -> AppliedArg
+appliedHostArg !argName = appliedHostArg' @t typeName argName $
   \_obj !d !exit -> exitEdhTx exit $ toDyn d
+  where
+    typeName = T.pack $ show $ typeRep (Proxy :: Proxy t)
 
 appliedHostArg' ::
   forall t.
@@ -151,12 +155,14 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
         _ -> badArg
       _ -> badArg
 
-performHostArg :: forall t. Typeable t => AnnoText -> AttrKey -> EffectfulArg
-performHostArg !typeName !argName =
+performHostArg :: forall t. Typeable t => AttrKey -> EffectfulArg
+performHostArg !argName =
   performHostArg' @t typeName argName $
     const $
       throwEdhTx UsageError $
         "missing effectful argument: " <> attrKeyStr argName
+  where
+    typeName = T.pack $ show $ typeRep (Proxy :: Proxy t)
 
 performHostArg' ::
   forall t.
