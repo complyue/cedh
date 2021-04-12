@@ -29,7 +29,7 @@ data AppliedArg
   = AppliedArg
       !AnnoText
       !AttrKey
-      (EdhThreadState -> EdhValue -> (Dynamic -> STM ()) -> STM ())
+      (EdhThreadState -> EdhValue -> (EdhValue -> Dynamic -> STM ()) -> STM ())
 
 -- | An argument to be additionally applied per each actual call
 --
@@ -39,7 +39,7 @@ data EffectfulArg
   = EffectfulArg
       !AnnoText
       !AttrKey
-      (EdhThreadState -> ((EdhValue, Dynamic) -> STM ()) -> STM ())
+      (EdhThreadState -> (EdhValue -> Dynamic -> STM ()) -> STM ())
 
 appliedCountArg :: AttrKey -> AppliedArg
 appliedCountArg = appliedCountArg' "positive!int!DecimalType"
@@ -48,7 +48,7 @@ appliedCountArg' :: AnnoText -> AttrKey -> AppliedArg
 appliedCountArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
     EdhDecimal !d | d >= 1 -> case D.decimalToInteger d of
-      Just !i -> exit $ toDyn (fromInteger i :: Int)
+      Just !i -> exit val $ toDyn (fromInteger i :: Int)
       Nothing -> edhValueDesc ets val $ \ !badDesc ->
         throwEdh ets UsageError $
           anno <> " as positive number expected but given: " <> badDesc
@@ -63,7 +63,7 @@ appliedIntArg' :: AnnoText -> AttrKey -> AppliedArg
 appliedIntArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
     EdhDecimal !d -> case D.decimalToInteger d of
-      Just !i -> exit $ toDyn (fromInteger i :: Int)
+      Just !i -> exit val $ toDyn (fromInteger i :: Int)
       Nothing -> edhValueDesc ets val $ \ !badDesc ->
         throwEdh ets UsageError $
           anno <> " as integer expected but given: " <> badDesc
@@ -77,7 +77,7 @@ appliedDoubleArg = appliedDoubleArg' "DecimalType"
 appliedDoubleArg' :: AnnoText -> AttrKey -> AppliedArg
 appliedDoubleArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d -> exit $ toDyn (fromRational (toRational d) :: Double)
+    EdhDecimal !d -> exit val $ toDyn (fromRational (toRational d) :: Double)
     _ -> edhValueDesc ets val $ \ !badDesc ->
       throwEdh ets UsageError $
         anno <> " as number expected but given: " <> badDesc
@@ -100,7 +100,7 @@ performDoubleArg' !anno !argName !effDefault =
       performEdhEffect' argName $ \ !maybeVal _ets ->
         case edhUltimate <$> maybeVal of
           Nothing ->
-            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit (v, toDyn d)
+            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit v $ toDyn d
           Just !val -> do
             let badArg = edhValueDesc ets val $ \ !badDesc ->
                   throwEdh ets UsageError $
@@ -108,7 +108,7 @@ performDoubleArg' !anno !argName !effDefault =
                       <> badDesc
             case edhUltimate val of
               EdhDecimal !d ->
-                exit (val, toDyn (fromRational (toRational d) :: Double))
+                exit val $ toDyn (fromRational (toRational d) :: Double)
               _ -> badArg
 
 appliedHostArg :: forall t. Typeable t => AttrKey -> AppliedArg
@@ -136,12 +136,12 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
             case comput'thunk comput of
               Effected !effected -> case fromDynamic effected of
                 Just (d :: t) -> runEdhTx ets $
-                  dmap obj d $ \ !dd' _ets -> exit dd'
+                  dmap obj d $ \ !dd' _ets -> exit val dd'
                 Nothing -> badArg
               Applied !applied | null (comput'effectful'args comput) ->
                 case fromDynamic applied of
                   Just (d :: t) -> runEdhTx ets $
-                    dmap obj d $ \ !dd' _ets -> exit dd'
+                    dmap obj d $ \ !dd' _ets -> exit val dd'
                   Nothing -> badArg
               _ -> edhValueDesc ets val $ \ !badDesc ->
                 throwEdh ets UsageError $
@@ -150,7 +150,7 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
                     <> badDesc
           Nothing -> case fromDynamic dd of
             Just (d :: t) -> runEdhTx ets $
-              dmap obj d $ \ !dd' _ets -> exit dd'
+              dmap obj d $ \ !dd' _ets -> exit val dd'
             Nothing -> badArg
         _ -> badArg
       _ -> badArg
@@ -177,7 +177,7 @@ performHostArg' !typeName !argName !effDefault =
       performEdhEffect' argName $ \ !maybeVal _ets ->
         case edhUltimate <$> maybeVal of
           Nothing ->
-            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit (v, toDyn d)
+            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit v $ toDyn d
           Just !val -> do
             let badArg = edhValueDesc ets val $ \ !badDesc ->
                   throwEdh ets UsageError $
@@ -190,11 +190,11 @@ performHostArg' !typeName !argName !effDefault =
                   Just !comput ->
                     case comput'thunk comput of
                       Effected !effected -> case fromDynamic effected of
-                        Just (_ :: t) -> exit (val, effected)
+                        Just (_ :: t) -> exit val effected
                         Nothing -> badArg
                       Applied !applied | null (comput'effectful'args comput) ->
                         case fromDynamic applied of
-                          Just (_ :: t) -> exit (val, applied)
+                          Just (_ :: t) -> exit val applied
                           Nothing -> badArg
                       _ -> edhValueDesc ets val $ \ !badDesc ->
                         throwEdh ets UsageError $
@@ -202,7 +202,7 @@ performHostArg' !typeName !argName !effDefault =
                             <> " not effected, it is: "
                             <> badDesc
                   Nothing -> case fromDynamic dd of
-                    Just (_ :: t) -> exit (val, dd)
+                    Just (_ :: t) -> exit val dd
                     Nothing -> badArg
                 _ -> badArg
               _ -> badArg
@@ -362,8 +362,8 @@ applyComputArgs
             doneArgs
             ((aa@(AppliedArg _anno _name !cnvt), Nothing) : restArgs)
             (pa : pas') =
-              cnvt ets pa $ \ !dd ->
-                applyPosArgs ((aa, Just (pa, dd)) : doneArgs) restArgs pas'
+              cnvt ets pa $ \ !av !dd ->
+                applyPosArgs ((aa, Just (av, dd)) : doneArgs) restArgs pas'
 
           applyKwArgs ::
             [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
@@ -394,9 +394,9 @@ applyComputArgs
                   case odTakeOut name kwas of
                     (Nothing, kwas') ->
                       applyKwArgs (doneArg : doneArgs) restArgs kwas'
-                    (Just !val, kwas') -> cnvt ets val $ \ !dd ->
+                    (Just !val, kwas') -> cnvt ets val $ \ !av !dd ->
                       applyKwArgs
-                        ((aa, Just (val, dd)) : doneArgs)
+                        ((aa, Just (av, dd)) : doneArgs)
                         restArgs
                         kwas'
 
@@ -725,7 +725,7 @@ createComputClass
             STM ()
           extractEffArg (_, Just !got) = ($ got)
           extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
-            extractor ets
+            \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
 
           hostApply :: [(EdhValue, Dynamic)] -> Dynamic -> Maybe Dynamic
           hostApply [] !df = Just df
