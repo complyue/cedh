@@ -262,6 +262,11 @@ computEdh ::
   ComputTBP
 computEdh !c = ComputEdh $ \ !ets !exit -> c ets $ \ !a -> exit (toDyn a)
 
+computEdh' ::
+  (EdhThreadState -> (Dynamic -> STM ()) -> STM ()) ->
+  ComputTBP
+computEdh' = ComputEdh
+
 -- | Result can't be returned on comput object construction, while the
 -- constructed comput object can always mult-shot by subsequent calls
 computEdhSTM :: (EdhTxExit EdhValue -> EdhTx) -> ComputTBP
