@@ -25,6 +25,8 @@ library
   exposed-modules:    Language.Edh.Curry
   other-modules:
     Language.Edh.Curry.Comput
+    Language.Edh.Curry.Shim
+
   hs-source-dirs:     src
   default-language:   Haskell2010
   default-extensions:
@@ -32,13 +34,19 @@ library
     BangPatterns
     ConstraintKinds
     DataKinds
+    DerivingStrategies
     FlexibleContexts
     FlexibleInstances
     GADTs
+    GeneralizedNewtypeDeriving
     KindSignatures
     LambdaCase
+    MultiWayIf
     OverloadedStrings
+    PatternSynonyms
+    RankNTypes
     ScopedTypeVariables
+    StandaloneDeriving
     TupleSections
     TypeApplications
     TypeOperators
@@ -69,13 +77,19 @@ executable cedh
     BangPatterns
     ConstraintKinds
     DataKinds
+    DerivingStrategies
     FlexibleContexts
     FlexibleInstances
     GADTs
+    GeneralizedNewtypeDeriving
     KindSignatures
     LambdaCase
+    MultiWayIf
     OverloadedStrings
+    PatternSynonyms
+    RankNTypes
     ScopedTypeVariables
+    StandaloneDeriving
     TupleSections
     TypeApplications
     TypeOperators
@@ -97,10 +111,10 @@ executable cedh
   build-depends:
     , base              >=4.12
     , bytestring
+    , cedh
     , edh
     , lossless-decimal
     , mtl
-    , cedh
     , stm               >=2.5
     , text
     , transformers

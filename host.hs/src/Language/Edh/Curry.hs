@@ -2,6 +2,7 @@ module Language.Edh.Curry
   ( installCurryBatteries,
     -- TODO organize and doc the re-exports
     module Language.Edh.Curry.Comput,
+    module Language.Edh.Curry.Shim,
   )
 where
 
@@ -9,6 +10,7 @@ where
 
 import Control.Monad
 import Language.Edh.Curry.Comput
+import Language.Edh.Curry.Shim
 import Language.Edh.EHI
 import Prelude
 
