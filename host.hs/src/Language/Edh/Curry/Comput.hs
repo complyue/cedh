@@ -280,6 +280,7 @@ data ComputTBP
   | ComputEdh (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
   | ComputEdhSTM (EdhTxExit EdhValue -> EdhTx)
   | ComputEdhIO (EdhThreadState -> IO EdhValue)
+  | InflateEdh (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
 
 computDone :: forall a. Typeable a => a -> ComputTBP
 computDone = ComputDone . toDyn
@@ -312,6 +313,11 @@ computEdhSTM = ComputEdhSTM
 computEdhIO :: (EdhThreadState -> IO EdhValue) -> ComputTBP
 computEdhIO = ComputEdhIO
 
+inflateEdh ::
+  (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ()) ->
+  ComputTBP
+inflateEdh = InflateEdh
+
 -- | The thunk of a computation can be in 3 different stages:
 -- - Unapplied
 --   - Only partial formal arguments have been collected,
@@ -336,33 +342,38 @@ data Comput = Comput
     comput'applied'args :: ![(AppliedArg, Maybe (EdhValue, Dynamic))],
     -- | Effectful arguments to be additionally applied per each call, with
     -- values collected in case of an effected computation.
-    comput'effectful'args :: ![(EffectfulArg, Maybe (EdhValue, Dynamic))]
+    comput'effectful'args :: ![(EffectfulArg, Maybe (EdhValue, Dynamic))],
+    -- | Results the computation actively yielded as it was effected
+    comput'results :: KwArgs
   }
 
 takeComputEffect ::
   Dynamic ->
   EdhThreadState ->
-  (Either Dynamic EdhValue -> STM ()) ->
+  (Either (Dynamic, KwArgs) EdhValue -> STM ()) ->
   STM ()
 takeComputEffect !effected !ets !exit = case fromDynamic effected of
-  Nothing -> exit $ Left effected
+  Nothing -> exit $ Left (effected, odEmpty)
   Just (tbp :: ComputTBP) -> case tbp of
-    ComputDone !done -> exit $ Left done
+    ComputDone !done -> exit $ Left (done, odEmpty)
     ComputIO !dynIO ->
       runEdhTx ets $
         edhContIO $
           dynPerformIO dynTypeBug dynIO >>= \ !effected' ->
-            atomically $ exit $ Left effected'
+            atomically $ exit $ Left (effected', odEmpty)
     ComputSTM !dynSTM ->
       edhContSTM'' ets $
         dynPerformSTM dynTypeBug dynSTM
-          >>= \ !effected' -> exit $ Left effected'
-    ComputEdh !act -> act ets $ \ !effected' -> exit $ Left effected'
+          >>= \ !effected' -> exit $ Left (effected', odEmpty)
+    ComputEdh !act ->
+      act ets $ \ !effected' -> exit $ Left (effected', odEmpty)
     ComputEdhSTM !act ->
       runEdhTx ets $ act $ \ !result _ets -> exit $ Right result
     ComputEdhIO !act ->
       runEdhTx ets $
         edhContIO $ act ets >>= \ !result -> atomically $ exit $ Right result
+    InflateEdh !act ->
+      act ets $ \ !effected' !results -> exit $ Left (effected', results)
   where
     dynTypeBug = error "bug: comput dyn type mismatch"
 
@@ -373,16 +384,16 @@ applyComputArgs ::
   (Comput -> STM ()) ->
   STM ()
 applyComputArgs
-  comput@(Comput !thunk !appliedArgs !effectfulArgs)
+  comput@(Comput !thunk !appliedArgs !effectfulArgs !results)
   !ets
   apk@(ArgsPack !args !kwargs)
   !exit = case thunk of
     Unapplied !unapplied -> applyArgs appliedArgs $ \ !appliedArgs' ->
       allApplied [] appliedArgs' >>= \case
-        Nothing -> exit $ Comput thunk appliedArgs' effectfulArgs
+        Nothing -> exit $ Comput thunk appliedArgs' effectfulArgs results
         Just !dds -> case hostApply dds unapplied of
           Just !applied ->
-            exit $ Comput (Applied applied) appliedArgs' effectfulArgs
+            exit $ Comput (Applied applied) appliedArgs' effectfulArgs results
           Nothing ->
             throwEdh ets UsageError "some computation argument not applicable"
     Applied {} ->
@@ -543,6 +554,7 @@ createComputClass'
                 (Unapplied $ toDyn hostComput)
                 ((,Nothing) <$> ctorAppArgs)
                 (maybe [] ((,Nothing) <$>) needEffects)
+                odEmpty
         applyComputArgs comput etsCtor apk $ \ !comput' ->
           case comput'thunk comput' of
             Applied !applied -> case needEffects of
@@ -550,11 +562,15 @@ createComputClass'
                 -- to be subsequently called after ctor, in effectful context
                 ctorExit Nothing $ HostStore $ toDyn comput'
               Nothing -> takeComputEffect applied etsCtor $ \case
-                Left !effected ->
+                Left (!effected, !results) ->
                   -- effect on ctor is final, this is a one-shot computation
                   ctorExit Nothing $
                     HostStore $
-                      toDyn comput' {comput'thunk = Effected effected}
+                      toDyn
+                        comput'
+                          { comput'thunk = Effected effected,
+                            comput'results = results
+                          }
                 Right _result ->
                   -- one effect shot is taken on ctor,
                   -- subsequent calls can further take more multi-shots
@@ -566,60 +582,77 @@ createComputClass'
       -- Obtain an argument by name
       argReadProc :: EdhValue -> EdhHostProc
       argReadProc !keyVal !exit !ets = withThisHostObj ets $
-        \(Comput _thunk !appliedArgs effArgs) ->
-          edhValueAsAttrKey ets keyVal $ \ !argKey -> do
-            let --
+        \(Comput _thunk !appliedArgs effArgs !results) ->
+          edhValueAsAttrKey ets keyVal $ \ !argKey ->
+            case odLookup argKey results of
+              Just !val -> exitEdh ets exit val
+              Nothing -> do
+                let --
 
-                matchAppArg ::
-                  STM () ->
-                  STM ()
-                matchAppArg !naExit = match appliedArgs
-                  where
-                    match ::
-                      [(AppliedArg, Maybe (EdhValue, Dynamic))] -> STM ()
-                    match [] = naExit
-                    match ((AppliedArg _anno !name _, ad) : rest) =
-                      if name == argKey
-                        then case ad of
-                          Just (av, _d) -> exitEdh ets exit av
-                          Nothing -> exitEdh ets exit edhNothing
-                        else match rest
+                    matchAppArg ::
+                      STM () ->
+                      STM ()
+                    matchAppArg !naExit = match appliedArgs
+                      where
+                        match ::
+                          [(AppliedArg, Maybe (EdhValue, Dynamic))] -> STM ()
+                        match [] = naExit
+                        match ((AppliedArg _anno !name _, ad) : rest) =
+                          if name == argKey
+                            then case ad of
+                              Just (av, _d) -> exitEdh ets exit av
+                              Nothing -> exitEdh ets exit edhNothing
+                            else match rest
 
-                matchEffArg :: STM () -> STM ()
-                matchEffArg !naExit = match effArgs
-                  where
-                    match ::
-                      [(EffectfulArg, Maybe (EdhValue, Dynamic))] -> STM ()
-                    match [] = naExit
-                    match ((_, Nothing) : rest) = match rest
-                    match ((EffectfulArg _anno !name _, ad) : rest) =
-                      if name == argKey
-                        then case ad of
-                          Just (av, _d) -> exitEdh ets exit av
-                          Nothing -> exitEdh ets exit edhNothing
-                        else match rest
+                    matchEffArg :: STM () -> STM ()
+                    matchEffArg !naExit = match effArgs
+                      where
+                        match ::
+                          [(EffectfulArg, Maybe (EdhValue, Dynamic))] -> STM ()
+                        match [] = naExit
+                        match ((_, Nothing) : rest) = match rest
+                        match ((EffectfulArg _anno !name _, ad) : rest) =
+                          if name == argKey
+                            then case ad of
+                              Just (av, _d) -> exitEdh ets exit av
+                              Nothing -> exitEdh ets exit edhNothing
+                            else match rest
 
-            matchAppArg $ matchEffArg $ exitEdh ets exit edhNA
+                matchAppArg $ matchEffArg $ exitEdh ets exit edhNA
 
       reprProc :: ArgsPack -> EdhHostProc
       reprProc _ !exit !ets = withThisHostObj ets $
-        \(Comput _thunk !appliedArgs effArgs) -> do
+        \(Comput _thunk !appliedArgs effArgs !results) -> do
           let withEffsPart :: (Text -> STM ()) -> STM ()
               withEffsPart !exit' = case effArgs of
                 [] -> exit' ""
                 _ -> seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
                   exit' $ " {# " <> T.unwords effsRepr <> " #}"
+              withResults :: (Text -> STM ()) -> STM ()
+              withResults !exit' = case odToList results of
+                [] -> exit' ""
+                !kwargs ->
+                  seqcontSTM (resultEntry <$> kwargs) $
+                    exit' . ("{# " <>) . (<> " #}\n") . T.unwords
+                where
+                  resultEntry (k, v) !exit'' = edhValueRepr ets v $ \ !r ->
+                    exit'' $ attrKeyStr k <> "= " <> r <> ","
 
-          withEffsPart $ \ !effsPart -> case appliedArgs of
-            [] ->
-              exitEdh ets exit $
-                EdhString $
-                  clsName <> "()" <> effsPart
-            _ ->
-              seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
+          withEffsPart $ \ !effsPart ->
+            withResults $ \ !resultsRepr -> case appliedArgs of
+              [] ->
                 exitEdh ets exit $
-                  EdhString $
-                    clsName <> "( " <> T.unwords argReprs <> " )" <> effsPart
+                  EdhString $ resultsRepr <> clsName <> "()" <> effsPart
+              _ ->
+                seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
+                  exitEdh ets exit $
+                    EdhString $
+                      resultsRepr
+                        <> clsName
+                        <> "( "
+                        <> T.unwords argReprs
+                        <> " )"
+                        <> effsPart
         where
           appliedRepr ::
             (AppliedArg, Maybe (EdhValue, Dynamic)) ->
@@ -643,36 +676,47 @@ createComputClass'
 
       showProc :: ArgsPack -> EdhHostProc
       showProc _ !exit !ets = withThisHostObj ets $
-        \(Comput !thunk !appliedArgs effArgs) ->
-          seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
-            case thunk of
-              Unapplied !unapplied ->
-                exitEdh ets exit $
-                  EdhString $
-                    clsName <> "(\n" <> T.unlines argReprs
-                      <> ") {# Unapplied "
-                      <> T.pack (show unapplied)
-                      <> " #}"
-              Applied !applied ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
+        \(Comput !thunk !appliedArgs effArgs !results) -> do
+          let withResults :: (Text -> STM ()) -> STM ()
+              withResults !exit' = case odToList results of
+                [] -> exit' ""
+                !kwargs ->
+                  seqcontSTM (resultEntry <$> kwargs) $
+                    exit' . ("{# Results\n" <>) . (<> " #}\n") . T.unlines
+                where
+                  resultEntry (k, v) !exit'' = edhValueRepr ets v $ \ !r ->
+                    exit'' $ "  " <> attrKeyStr k <> "= " <> r <> ","
+
+          withResults $ \ !resultsLines ->
+            seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
+              case thunk of
+                Unapplied !unapplied ->
                   exitEdh ets exit $
                     EdhString $
-                      clsName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Applied "
-                        <> T.pack (show applied)
-                        <> "\n"
-                        <> T.unlines effsRepr
-                        <> "#}"
-              Effected !effected ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      clsName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Effected "
-                        <> T.pack (show effected)
-                        <> "\n"
-                        <> T.unlines effsRepr
-                        <> "#}"
+                      resultsLines <> clsName <> "(\n" <> T.unlines argReprs
+                        <> ") {# Unapplied "
+                        <> T.pack (show unapplied)
+                        <> " #}"
+                Applied !applied ->
+                  seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
+                    exitEdh ets exit $
+                      EdhString $
+                        resultsLines <> clsName <> "(\n" <> T.unlines argReprs
+                          <> ") {# Applied "
+                          <> T.pack (show applied)
+                          <> "\n"
+                          <> T.unlines effsRepr
+                          <> "#}"
+                Effected !effected ->
+                  seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
+                    exitEdh ets exit $
+                      EdhString $
+                        resultsLines <> clsName <> "(\n" <> T.unlines argReprs
+                          <> ") {# Effected "
+                          <> T.pack (show effected)
+                          <> "\n"
+                          <> T.unlines effsRepr
+                          <> "#}"
         where
           appliedRepr ::
             (AppliedArg, Maybe (EdhValue, Dynamic)) ->
@@ -721,7 +765,7 @@ createComputClass'
                         UsageError
                         "some effectful argument not applicable"
                     Just !applied' -> takeComputEffect applied' ets $ \case
-                      Left !effected -> do
+                      Left (!effected, !results) -> do
                         !newOid <- unsafeIOToSTM newUnique
                         exitEdh ets exit $
                           EdhObject
@@ -732,7 +776,8 @@ createComputClass'
                                     toDyn
                                       comput'
                                         { comput'thunk = Effected effected,
-                                          comput'effectful'args = effArgs'
+                                          comput'effectful'args = effArgs',
+                                          comput'results = results
                                         }
                               }
                       Right !result -> exitEdh ets exit result
