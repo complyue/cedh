@@ -114,7 +114,7 @@ performDoubleArg' !anno !argName !effDefault =
 
 appliedHostArg :: forall t. Typeable t => AttrKey -> AppliedArg
 appliedHostArg !argName = appliedHostArg' @t typeName argName $
-  \_obj !d !exit -> exitEdhTx exit $ toDyn d
+  \ !val _obj !d !exit -> exitEdhTx exit (val, toDyn d)
   where
     typeName = T.pack $ show $ typeRep (Proxy :: Proxy t)
 
@@ -123,7 +123,7 @@ appliedHostArg' ::
   Typeable t =>
   AnnoText ->
   AttrKey ->
-  (Object -> t -> EdhTxExit Dynamic -> EdhTx) ->
+  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
   AppliedArg
 appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
   \ !ets !val !exit -> do
@@ -137,12 +137,12 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
             case comput'thunk comput of
               Effected !effected -> case fromDynamic effected of
                 Just (d :: t) -> runEdhTx ets $
-                  dmap obj d $ \ !dd' _ets -> exit val dd'
+                  dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
                 Nothing -> badArg
               Applied !applied | null (comput'effectful'args comput) ->
                 case fromDynamic applied of
                   Just (d :: t) -> runEdhTx ets $
-                    dmap obj d $ \ !dd' _ets -> exit val dd'
+                    dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
                   Nothing -> badArg
               _ -> edhValueDesc ets val $ \ !badDesc ->
                 throwEdh ets UsageError $
@@ -151,7 +151,7 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
                     <> badDesc
           Nothing -> case fromDynamic dd of
             Just (d :: t) -> runEdhTx ets $
-              dmap obj d $ \ !dd' _ets -> exit val dd'
+              dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
             Nothing -> badArg
         _ -> badArg
       _ -> badArg
@@ -173,6 +173,33 @@ performHostArg' ::
   (((EdhValue, t) -> EdhTx) -> EdhTx) ->
   EffectfulArg
 performHostArg' !typeName !argName !effDefault =
+  performHostArg''' typeName argName effDefault $
+    \ !val _obj !d !exit -> exitEdhTx exit (val, toDyn d)
+
+performHostArg'' ::
+  forall t.
+  Typeable t =>
+  AnnoText ->
+  AttrKey ->
+  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
+  EffectfulArg
+performHostArg'' !typeName !argName !dmap =
+  performHostArg''' @t typeName argName effDefault dmap
+  where
+    effDefault =
+      const $
+        throwEdhTx UsageError $
+          "missing effectful argument: " <> attrKeyStr argName
+
+performHostArg''' ::
+  forall t.
+  Typeable t =>
+  AnnoText ->
+  AttrKey ->
+  (((EdhValue, t) -> EdhTx) -> EdhTx) ->
+  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
+  EffectfulArg
+performHostArg''' !typeName !argName !effDefault !dmap =
   EffectfulArg typeName argName $ \ !ets !exit ->
     runEdhTx ets $
       performEdhEffect' argName $ \ !maybeVal _ets ->
@@ -191,11 +218,17 @@ performHostArg' !typeName !argName !effDefault =
                   Just !comput ->
                     case comput'thunk comput of
                       Effected !effected -> case fromDynamic effected of
-                        Just (_ :: t) -> exit val effected
+                        Just (d :: t) ->
+                          runEdhTx ets $
+                            dmap val obj d $
+                              \(!val', !dd') _ets -> exit val' dd'
                         Nothing -> badArg
                       Applied !applied | null (comput'effectful'args comput) ->
                         case fromDynamic applied of
-                          Just (_ :: t) -> exit val applied
+                          Just (d :: t) ->
+                            runEdhTx ets $
+                              dmap val obj d $
+                                \(!val', !dd') _ets -> exit val' dd'
                           Nothing -> badArg
                       _ -> edhValueDesc ets val $ \ !badDesc ->
                         throwEdh ets UsageError $
@@ -203,7 +236,9 @@ performHostArg' !typeName !argName !effDefault =
                             <> " not effected, it is: "
                             <> badDesc
                   Nothing -> case fromDynamic dd of
-                    Just (_ :: t) -> exit val dd
+                    Just (d :: t) ->
+                      runEdhTx ets $
+                        dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
                     Nothing -> badArg
                 _ -> badArg
               _ -> badArg
