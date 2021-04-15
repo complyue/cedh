@@ -276,7 +276,9 @@ computArgDefault'' !args !kwargs !clsComput !exit =
 data ComputTBP
   = ComputDone !Dynamic
   | ComputIO !Dynamic
+  | ComputIO' !(IO Dynamic)
   | ComputSTM !Dynamic
+  | ComputSTM' !(STM Dynamic)
   | ComputEdh (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
   | ComputEdhSTM (EdhTxExit EdhValue -> EdhTx)
   | ComputEdhIO (EdhThreadState -> IO EdhValue)
@@ -288,8 +290,14 @@ computDone = ComputDone . toDyn
 computIO :: forall a. Typeable a => IO a -> ComputTBP
 computIO = ComputIO . toDyn
 
+computIO' :: IO Dynamic -> ComputTBP
+computIO' = ComputIO'
+
 computSTM :: forall a. Typeable a => STM a -> ComputTBP
 computSTM = ComputSTM . toDyn
+
+computSTM' :: STM Dynamic -> ComputTBP
+computSTM' = ComputSTM'
 
 computEdh ::
   forall a.
@@ -361,10 +369,18 @@ takeComputEffect !effected !ets !exit = case fromDynamic effected of
         edhContIO $
           dynPerformIO dynTypeBug dynIO >>= \ !effected' ->
             atomically $ exit $ Left (effected', odEmpty)
+    ComputIO' !ioa ->
+      runEdhTx ets $
+        edhContIO $
+          ioa >>= \ !effected' ->
+            atomically $ exit $ Left (effected', odEmpty)
     ComputSTM !dynSTM ->
       edhContSTM'' ets $
         dynPerformSTM dynTypeBug dynSTM
           >>= \ !effected' -> exit $ Left (effected', odEmpty)
+    ComputSTM' !stma ->
+      edhContSTM'' ets $
+        stma >>= \ !effected' -> exit $ Left (effected', odEmpty)
     ComputEdh !act ->
       act ets $ \ !effected' -> exit $ Left (effected', odEmpty)
     ComputEdhSTM !act ->
