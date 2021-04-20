@@ -707,12 +707,15 @@ createComputClass'
             seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
               case thunk of
                 Unapplied !unapplied ->
-                  exitEdh ets exit $
-                    EdhString $
-                      resultsLines <> clsName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Unapplied "
-                        <> T.pack (show unapplied)
-                        <> " #}"
+                  seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
+                    exitEdh ets exit $
+                      EdhString $
+                        resultsLines <> clsName <> "(\n" <> T.unlines argReprs
+                          <> ") {# Unapplied "
+                          <> T.pack (show unapplied)
+                          <> "\n"
+                          <> T.unlines effsRepr
+                          <> "#}"
                 Applied !applied ->
                   seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
                     exitEdh ets exit $
