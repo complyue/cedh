@@ -765,41 +765,24 @@ createComputClass'
       callProc !apk !exit !ets = withThisHostObj ets $
         \ !comput -> applyComputArgs comput ets apk $ \ !comput' ->
           case comput'thunk comput' of
-            Applied !applied -> do
-              let !effArgs = comput'effectful'args comput'
-              seqcontSTM (extractEffArg <$> effArgs) $
-                \ !effs -> do
-                  let effArgs' =
-                        zipWith
-                          ( \(!ea, _) !av ->
-                              (ea, Just av)
-                          )
-                          effArgs
-                          effs
-
-                  case hostApply effs applied of
-                    Nothing ->
-                      throwEdh
-                        ets
-                        UsageError
-                        "some effectful argument not applicable"
-                    Just !applied' -> takeComputEffect applied' ets $ \case
-                      Left (!effected, !results) -> do
-                        !newOid <- unsafeIOToSTM newUnique
-                        exitEdh ets exit $
-                          EdhObject
-                            this
-                              { edh'obj'ident = newOid,
-                                edh'obj'store =
-                                  HostStore $
-                                    toDyn
-                                      comput'
-                                        { comput'thunk = Effected effected,
-                                          comput'effectful'args = effArgs',
-                                          comput'results = results
-                                        }
-                              }
-                      Right !result -> exitEdh ets exit result
+            Applied !applied ->
+              effectComput ets applied (comput'effectful'args comput') $ \case
+                Left (!effected, !effArgs, !results) -> do
+                  !newOid <- unsafeIOToSTM newUnique
+                  exitEdh ets exit $
+                    EdhObject
+                      this
+                        { edh'obj'ident = newOid,
+                          edh'obj'store =
+                            HostStore $
+                              toDyn
+                                comput'
+                                  { comput'thunk = Effected effected,
+                                    comput'effectful'args = effArgs,
+                                    comput'results = results
+                                  }
+                        }
+                Right !result -> exitEdh ets exit result
             _ -> do
               !newOid <- unsafeIOToSTM newUnique
               exitEdh ets exit $
@@ -813,14 +796,46 @@ createComputClass'
           !scope = contextScope ctx
           !this = edh'scope'this scope
 
-          extractEffArg ::
-            (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-            ((EdhValue, Dynamic) -> STM ()) ->
-            STM ()
-          extractEffArg (_, Just !got) = ($ got)
-          extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
-            \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
+effectComput ::
+  EdhThreadState ->
+  Dynamic ->
+  [(EffectfulArg, Maybe (EdhValue, Dynamic))] ->
+  ( Either
+      (Dynamic, [(EffectfulArg, Maybe (EdhValue, Dynamic))], KwArgs)
+      EdhValue ->
+    STM ()
+  ) ->
+  STM ()
+effectComput !ets !applied !effArgs !exit =
+  seqcontSTM (extractEffArg <$> effArgs) $
+    \ !effs -> do
+      let effArgs' =
+            zipWith
+              ( \(!ea, _) !av ->
+                  (ea, Just av)
+              )
+              effArgs
+              effs
 
-          hostApply :: [(EdhValue, Dynamic)] -> Dynamic -> Maybe Dynamic
-          hostApply [] !df = Just df
-          hostApply ((_v, a) : as) !df = dynApply df a >>= hostApply as
+      case hostApply effs applied of
+        Nothing ->
+          throwEdh
+            ets
+            UsageError
+            "some effectful argument not applicable"
+        Just !applied' -> takeComputEffect applied' ets $ \case
+          Left (!effected, !results) ->
+            exit $ Left (effected, effArgs', results)
+          Right !result -> exit $ Right result
+  where
+    extractEffArg ::
+      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
+      ((EdhValue, Dynamic) -> STM ()) ->
+      STM ()
+    extractEffArg (_, Just !got) = ($ got)
+    extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
+      \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
+
+    hostApply :: [(EdhValue, Dynamic)] -> Dynamic -> Maybe Dynamic
+    hostApply [] !df = Just df
+    hostApply ((_v, a) : as) !df = dynApply df a >>= hostApply as
