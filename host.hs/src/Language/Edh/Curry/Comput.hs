@@ -287,6 +287,9 @@ data ComputTBP
 computDone :: forall a. Typeable a => a -> ComputTBP
 computDone = ComputDone . toDyn
 
+computDone' :: Dynamic -> ComputTBP
+computDone' = ComputDone
+
 computIO :: forall a. Typeable a => IO a -> ComputTBP
 computIO = ComputIO . toDyn
 
