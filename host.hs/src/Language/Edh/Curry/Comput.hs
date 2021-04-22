@@ -7,14 +7,13 @@ import Control.Monad
 import Data.Dynamic
 import qualified Data.Lossless.Decimal as D
 import Data.Maybe
-import Data.Proxy
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Typeable
 import Data.Unique
 import GHC.Conc (unsafeIOToSTM)
 import Language.Edh.Curry.Shim
 import Language.Edh.EHI
+import Type.Reflection
 import Prelude
 
 type AnnoText = Text
@@ -112,11 +111,66 @@ performDoubleArg' !anno !argName !effDefault =
                 exit val $ toDyn (fromRational (toRational d) :: Double)
               _ -> badArg
 
+appliedHostSeqArg :: forall t. Typeable t => AttrKey -> AppliedArg
+appliedHostSeqArg !argName = appliedHostSeqArg' @t typeName argName $
+  \ !val !ds !exit -> exitEdhTx exit (val, toDyn $! snd <$> ds)
+  where
+    typeName = T.pack $ "[" <> show (typeRep @t) <> "]"
+
+appliedHostSeqArg' ::
+  forall t.
+  Typeable t =>
+  AnnoText ->
+  AttrKey ->
+  (EdhValue -> [(Object, t)] -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
+  AppliedArg
+appliedHostSeqArg' !typeName !argName !dmap = AppliedArg typeName argName $
+  \ !ets !val !exit -> do
+    let badArg = edhValueDesc ets val $ \ !badDesc ->
+          throwEdh ets UsageError $
+            "host objects " <> typeName <> " expected but given: " <> badDesc
+        badArgElem elemVal = edhValueDesc ets elemVal $ \ !badDesc ->
+          throwEdh ets UsageError $
+            "host objects " <> typeName <> " expected but one is: " <> badDesc
+        parseElements :: [(Object, t)] -> [EdhValue] -> STM ()
+        parseElements results [] = runEdhTx ets $
+          dmap val (reverse $! results) $ \(!val', !dd) _ets -> exit val' dd
+        parseElements results (elemVal : rest) = case edhUltimate elemVal of
+          EdhObject !obj -> case edh'obj'store obj of
+            HostStore !dd -> case fromDynamic dd of
+              Just !comput ->
+                case comput'thunk comput of
+                  Effected !effected -> case fromDynamic effected of
+                    Just (d :: t) -> parseElements ((obj, d) : results) rest
+                    Nothing -> badElem
+                  Applied !applied | null (comput'effectful'args comput) ->
+                    case fromDynamic applied of
+                      Just (d :: t) -> parseElements ((obj, d) : results) rest
+                      Nothing -> badElem
+                  _ -> edhValueDesc ets val $ \ !badDesc ->
+                    throwEdh ets UsageError $
+                      "comput given for " <> attrKeyStr argName
+                        <> " not effected, it is: "
+                        <> badDesc
+              Nothing -> case fromDynamic dd of
+                Just (d :: t) -> parseElements ((obj, d) : results) rest
+                Nothing -> badElem
+            _ -> badElem
+          _ -> badElem
+          where
+            badElem = badArgElem elemVal
+
+    case edhUltimate val of
+      EdhArgsPack (ArgsPack !args !kwargs)
+        | odNull kwargs -> parseElements [] args
+      EdhList (List _ !lv) -> readTVar lv >>= parseElements []
+      _ -> badArg
+
 appliedHostArg :: forall t. Typeable t => AttrKey -> AppliedArg
 appliedHostArg !argName = appliedHostArg' @t typeName argName $
   \ !val _obj !d !exit -> exitEdhTx exit (val, toDyn d)
   where
-    typeName = T.pack $ show $ typeRep (Proxy :: Proxy t)
+    typeName = T.pack $ show (typeRep @t)
 
 appliedHostArg' ::
   forall t.
@@ -163,7 +217,7 @@ performHostArg !argName =
       throwEdhTx UsageError $
         "missing effectful argument: " <> attrKeyStr argName
   where
-    typeName = T.pack $ show $ typeRep (Proxy :: Proxy t)
+    typeName = T.pack $ show (typeRep @t)
 
 performHostArg' ::
   forall t.
