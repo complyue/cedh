@@ -630,24 +630,31 @@ createComputClass'
           case comput'thunk comput' of
             Applied !applied ->
               if effOnCtor
-                then takeComputEffect applied etsCtor $ \case
-                  Left (!effected, !results) ->
-                    -- effect on ctor is final, this is a one-shot computation
-                    ctorExit Nothing $
-                      HostStore $
-                        toDyn
-                          comput'
-                            { comput'thunk = Effected effected,
-                              comput'results = results
-                            }
-                  Right _result ->
-                    -- one effect shot is taken on ctor,
-                    -- subsequent calls can further take more multi-shots
-                    ctorExit Nothing $ HostStore $ toDyn comput'
+                then effectComput
+                  etsCtor
+                  applied
+                  (comput'effectful'args comput)
+                  $ \case
+                    Left (!effected, !effArgs, !results) ->
+                      -- one-shot effection on construction
+                      ctorExit Nothing $
+                        HostStore $
+                          toDyn
+                            comput'
+                              { comput'thunk = Effected effected,
+                                comput'effectful'args = effArgs,
+                                comput'results = results
+                              }
+                    Right _result ->
+                      -- one effect shot is taken on ctor, as it returns an
+                      -- Edh value instead of Dynamic host value, the result
+                      -- object stays applied only, it can be subsequently
+                      -- called more times, to take multi-shots
+                      ctorExit Nothing $ HostStore $ toDyn comput'
                 else -- not to take effect on construction
                   ctorExit Nothing $ HostStore $ toDyn comput'
             _ ->
-              -- leave it effected, or not fully applied
+              -- leave it effected, or unapplied
               ctorExit Nothing $ HostStore $ toDyn comput'
 
       -- Obtain an argument by name
