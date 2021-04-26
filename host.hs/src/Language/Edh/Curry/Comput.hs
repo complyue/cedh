@@ -41,14 +41,25 @@ data EffectfulArg
       !AttrKey
       (EdhThreadState -> (EdhValue -> Dynamic -> STM ()) -> STM ())
 
-appliedCountArg :: AttrKey -> AppliedArg
-appliedCountArg = appliedCountArg' "positive!int!DecimalType"
+-- * utility arg parsing helpers
 
-appliedCountArg' :: AnnoText -> AttrKey -> AppliedArg
+appliedCountArg ::
+  forall a.
+  (Typeable a, Integral a) =>
+  AttrKey ->
+  AppliedArg
+appliedCountArg = appliedCountArg' @a "positive!int!DecimalType"
+
+appliedCountArg' ::
+  forall a.
+  (Typeable a, Integral a) =>
+  AnnoText ->
+  AttrKey ->
+  AppliedArg
 appliedCountArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
     EdhDecimal !d | d >= 1 -> case D.decimalToInteger d of
-      Just !i -> exit val $ toDyn (fromInteger i :: Int)
+      Just !i -> exit val $ toDyn (fromInteger i :: a)
       Nothing -> edhValueDesc ets val $ \ !badDesc ->
         throwEdh ets UsageError $
           anno <> " as positive number expected but given: " <> badDesc
@@ -56,14 +67,19 @@ appliedCountArg' !anno !argName = AppliedArg anno argName $
       throwEdh ets UsageError $
         anno <> " as positive number expected but given: " <> badDesc
 
-appliedIntArg :: AttrKey -> AppliedArg
-appliedIntArg = appliedIntArg' "int!DecimalType"
+appliedIntArg :: forall a. (Typeable a, Integral a) => AttrKey -> AppliedArg
+appliedIntArg = appliedIntArg' @a "int!DecimalType"
 
-appliedIntArg' :: AnnoText -> AttrKey -> AppliedArg
+appliedIntArg' ::
+  forall a.
+  (Typeable a, Integral a) =>
+  AnnoText ->
+  AttrKey ->
+  AppliedArg
 appliedIntArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
     EdhDecimal !d -> case D.decimalToInteger d of
-      Just !i -> exit val $ toDyn (fromInteger i :: Int)
+      Just !i -> exit val $ toDyn (fromInteger i :: a)
       Nothing -> edhValueDesc ets val $ \ !badDesc ->
         throwEdh ets UsageError $
           anno <> " as integer expected but given: " <> badDesc
@@ -71,30 +87,41 @@ appliedIntArg' !anno !argName = AppliedArg anno argName $
       throwEdh ets UsageError $
         anno <> " as integer expected but given: " <> badDesc
 
-appliedDoubleArg :: AttrKey -> AppliedArg
-appliedDoubleArg = appliedDoubleArg' "DecimalType"
+appliedFloatArg :: forall a. (Typeable a, RealFloat a) => AttrKey -> AppliedArg
+appliedFloatArg = appliedFloatArg' @a "DecimalType"
 
-appliedDoubleArg' :: AnnoText -> AttrKey -> AppliedArg
-appliedDoubleArg' !anno !argName = AppliedArg anno argName $
+appliedFloatArg' ::
+  forall a.
+  (Typeable a, RealFloat a) =>
+  AnnoText ->
+  AttrKey ->
+  AppliedArg
+appliedFloatArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d -> exit val $ toDyn (fromRational (toRational d) :: Double)
+    EdhDecimal !d -> exit val $ toDyn (fromRational (toRational d) :: a)
     _ -> edhValueDesc ets val $ \ !badDesc ->
       throwEdh ets UsageError $
         anno <> " as number expected but given: " <> badDesc
 
-performDoubleArg :: AttrKey -> EffectfulArg
-performDoubleArg !argName =
-  performDoubleArg' "DecimalType" argName $
+performFloatArg ::
+  forall a.
+  (Typeable a, RealFloat a) =>
+  AttrKey ->
+  EffectfulArg
+performFloatArg !argName =
+  performFloatArg' @a "DecimalType" argName $
     const $
       throwEdhTx UsageError $
         "missing effectful argument: " <> attrKeyStr argName
 
-performDoubleArg' ::
+performFloatArg' ::
+  forall a.
+  (Typeable a, RealFloat a) =>
   AnnoText ->
   AttrKey ->
-  (((EdhValue, Double) -> EdhTx) -> EdhTx) ->
+  (((EdhValue, a) -> EdhTx) -> EdhTx) ->
   EffectfulArg
-performDoubleArg' !anno !argName !effDefault =
+performFloatArg' !anno !argName !effDefault =
   EffectfulArg anno argName $ \ !ets !exit ->
     runEdhTx ets $
       performEdhEffect' argName $ \ !maybeVal _ets ->
@@ -108,7 +135,7 @@ performDoubleArg' !anno !argName !effDefault =
                       <> badDesc
             case edhUltimate val of
               EdhDecimal !d ->
-                exit val $ toDyn (fromRational (toRational d) :: Double)
+                exit val $ toDyn (fromRational (toRational d) :: a)
               _ -> badArg
 
 appliedHostSeqArg :: forall t. Typeable t => AttrKey -> AppliedArg
@@ -297,6 +324,10 @@ performHostArg''' !typeName !argName !effDefault !dmap =
                 _ -> badArg
               _ -> badArg
 
+-- * utilities providing argument default value, by constructing object of the
+
+-- designated comput class
+
 computArgDefault ::
   forall t. Typeable t => Object -> (((EdhValue, t) -> EdhTx) -> EdhTx)
 computArgDefault = computArgDefault' []
@@ -322,6 +353,8 @@ computArgDefault'' !args !kwargs !clsComput !exit =
       Just (d :: t) -> exit (EdhObject obj, d)
       Nothing -> error "bug: wrong host type constructed from a comput class"
     _ -> error "bug: a comput class based default arg value ctor not effecting"
+
+-- * Host representation of scriptable computations
 
 -- | Computation to be performed
 --
@@ -412,6 +445,8 @@ data Comput = Comput
     comput'results :: KwArgs
   }
 
+-- * Host computation manipulation utilities
+
 takeComputEffect ::
   Dynamic ->
   EdhThreadState ->
@@ -464,11 +499,15 @@ applyComputArgs
     Unapplied !unapplied -> applyArgs appliedArgs $ \ !appliedArgs' ->
       allApplied [] appliedArgs' >>= \case
         Nothing -> exit $ Comput thunk appliedArgs' effectfulArgs results
-        Just !dds -> case hostApply dds unapplied of
-          Just !applied ->
+        Just !dds -> case hostApply 0 dds unapplied of
+          Right !applied ->
             exit $ Comput (Applied applied) appliedArgs' effectfulArgs results
-          Nothing ->
-            throwEdh ets UsageError "some computation argument not applicable"
+          Left !nArgApplied ->
+            seqcontSTM (appliedRepr <$> drop nArgApplied appliedArgs') $
+              \ !appsRepr ->
+                throwEdh ets UsageError $
+                  "some computation argument not applicable:\n"
+                    <> T.unlines appsRepr
     Applied {} ->
       if null args && odNull kwargs
         then exit comput
@@ -478,9 +517,11 @@ applyComputArgs
     Effected {} ->
       throwEdh ets UsageError "you don't call already effected computation"
     where
-      hostApply :: [Dynamic] -> Dynamic -> Maybe Dynamic
-      hostApply [] !df = Just df
-      hostApply (a : as) !df = dynApply df a >>= hostApply as
+      hostApply :: Int -> [Dynamic] -> Dynamic -> Either Int Dynamic
+      hostApply _ [] !df = Right df
+      hostApply !nArgApplied (a : as) !df = case dynApply df a of
+        Nothing -> Left nArgApplied
+        Just !appliedSoFar -> hostApply (nArgApplied + 1) as appliedSoFar
 
       allApplied ::
         [Dynamic] ->
@@ -551,6 +592,79 @@ applyComputArgs
                         ((aa, Just (av, dd)) : doneArgs)
                         restArgs
                         kwas'
+      appliedRepr ::
+        (AppliedArg, Maybe (EdhValue, Dynamic)) ->
+        (Text -> STM ()) ->
+        STM ()
+      appliedRepr (AppliedArg !anno !name _, Nothing) !exit' =
+        exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
+      appliedRepr (AppliedArg !anno !name _, Just (v, _d)) !exit' =
+        edhValueRepr ets v $ \ !vRepr ->
+          exit' $
+            "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
+              <> ","
+
+effectComput ::
+  EdhThreadState ->
+  Dynamic ->
+  [(EffectfulArg, Maybe (EdhValue, Dynamic))] ->
+  ( Either
+      (Dynamic, [(EffectfulArg, Maybe (EdhValue, Dynamic))], KwArgs)
+      EdhValue ->
+    STM ()
+  ) ->
+  STM ()
+effectComput !ets !applied !effArgs !exit =
+  seqcontSTM (extractEffArg <$> effArgs) $
+    \ !effs -> do
+      let effArgs' =
+            zipWith
+              ( \(!ea, _) !av ->
+                  (ea, Just av)
+              )
+              effArgs
+              effs
+
+      case hostApply 0 effs applied of
+        Left !nArgApplied ->
+          seqcontSTM (effRepr <$> drop nArgApplied effArgs) $ \ !effsRepr ->
+            throwEdh
+              ets
+              UsageError
+              $ "some effectful argument not applicable:\n"
+                <> T.unlines effsRepr
+        Right !applied' -> takeComputEffect applied' ets $ \case
+          Left (!effected, !results) ->
+            exit $ Left (effected, effArgs', results)
+          Right !result -> exit $ Right result
+  where
+    extractEffArg ::
+      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
+      ((EdhValue, Dynamic) -> STM ()) ->
+      STM ()
+    extractEffArg (_, Just !got) = ($ got)
+    extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
+      \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
+
+    hostApply :: Int -> [(EdhValue, Dynamic)] -> Dynamic -> Either Int Dynamic
+    hostApply _ [] !df = Right df
+    hostApply !nArgApplied ((_v, a) : as) !df = case dynApply df a of
+      Nothing -> Left nArgApplied
+      Just !appliedSoFar -> hostApply (nArgApplied + 1) as appliedSoFar
+
+    effRepr ::
+      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
+      (Text -> STM ()) ->
+      STM ()
+    effRepr (EffectfulArg !anno !name _, Nothing) !exit' =
+      exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
+    effRepr (EffectfulArg !anno !name _, Just (v, _d)) !exit' =
+      edhValueRepr ets v $ \ !vRepr ->
+        exit' $
+          "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
+            <> ","
+
+-- * Host comput classes, definition & usage
 
 -- | Construct a computation instance with no args
 constructComput :: Object -> ((Object, ComputThunk) -> EdhTx) -> EdhTx
@@ -857,47 +971,3 @@ createComputClass'
           !ctx = edh'context ets
           !scope = contextScope ctx
           !this = edh'scope'this scope
-
-effectComput ::
-  EdhThreadState ->
-  Dynamic ->
-  [(EffectfulArg, Maybe (EdhValue, Dynamic))] ->
-  ( Either
-      (Dynamic, [(EffectfulArg, Maybe (EdhValue, Dynamic))], KwArgs)
-      EdhValue ->
-    STM ()
-  ) ->
-  STM ()
-effectComput !ets !applied !effArgs !exit =
-  seqcontSTM (extractEffArg <$> effArgs) $
-    \ !effs -> do
-      let effArgs' =
-            zipWith
-              ( \(!ea, _) !av ->
-                  (ea, Just av)
-              )
-              effArgs
-              effs
-
-      case hostApply effs applied of
-        Nothing ->
-          throwEdh
-            ets
-            UsageError
-            "some effectful argument not applicable"
-        Just !applied' -> takeComputEffect applied' ets $ \case
-          Left (!effected, !results) ->
-            exit $ Left (effected, effArgs', results)
-          Right !result -> exit $ Right result
-  where
-    extractEffArg ::
-      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-      ((EdhValue, Dynamic) -> STM ()) ->
-      STM ()
-    extractEffArg (_, Just !got) = ($ got)
-    extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
-      \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
-
-    hostApply :: [(EdhValue, Dynamic)] -> Dynamic -> Maybe Dynamic
-    hostApply [] !df = Just df
-    hostApply ((_v, a) : as) !df = dynApply df a >>= hostApply as
