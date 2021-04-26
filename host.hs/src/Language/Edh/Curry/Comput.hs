@@ -666,6 +666,17 @@ effectComput !ets !applied !effArgs !exit =
 
 -- * Host comput classes, definition & usage
 
+-- | Obtain the 'Dynamic' value of a host object, it can be an effected comput
+-- or a raw host value
+effectedComput :: Object -> Maybe Dynamic
+effectedComput !obj = case edh'obj'store obj of
+  HostStore !dhs -> case fromDynamic dhs of
+    Just comput@Comput {} -> case comput'thunk comput of
+      Effected !effected -> Just effected
+      _ -> Nothing
+    _ -> Just dhs
+  _ -> Nothing
+
 -- | Construct a computation instance with no args
 constructComput :: Object -> ((Object, ComputThunk) -> EdhTx) -> EdhTx
 constructComput = constructComput' []
