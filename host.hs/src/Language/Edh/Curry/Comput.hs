@@ -584,24 +584,22 @@ createComputClass ::
   t ->
   Scope ->
   STM Object
-createComputClass !clsName !ctorAppArgs = \case
-  [] -> createComputClass' clsName ctorAppArgs Nothing
-  !ctorEffArgs -> createComputClass' clsName ctorAppArgs (Just ctorEffArgs)
+createComputClass = createComputClass' True
 
 createComputClass' ::
   Typeable t =>
+  Bool ->
   AttrName ->
   [AppliedArg] ->
-  -- 'Nothing' means taking effect on ctor if fully applied,
-  -- 'Just []' means with subsequent calls to take effect.
-  Maybe [EffectfulArg] ->
+  [EffectfulArg] ->
   t ->
   Scope ->
   STM Object
 createComputClass'
+  !effOnCtor
   !clsName
   !ctorAppArgs
-  !needEffects
+  !ctorEffArgs
   !hostComput
   !clsOuterScope =
     mkHostClass clsOuterScope clsName computAllocator [] $
@@ -626,27 +624,27 @@ createComputClass'
               Comput
                 (Unapplied $ toDyn hostComput)
                 ((,Nothing) <$> ctorAppArgs)
-                (maybe [] ((,Nothing) <$>) needEffects)
+                ((,Nothing) <$> ctorEffArgs)
                 odEmpty
         applyComputArgs comput etsCtor apk $ \ !comput' ->
           case comput'thunk comput' of
-            Applied !applied -> case needEffects of
-              Just {} ->
-                -- to be subsequently called after ctor, in effectful context
-                ctorExit Nothing $ HostStore $ toDyn comput'
-              Nothing -> takeComputEffect applied etsCtor $ \case
-                Left (!effected, !results) ->
-                  -- effect on ctor is final, this is a one-shot computation
-                  ctorExit Nothing $
-                    HostStore $
-                      toDyn
-                        comput'
-                          { comput'thunk = Effected effected,
-                            comput'results = results
-                          }
-                Right _result ->
-                  -- one effect shot is taken on ctor,
-                  -- subsequent calls can further take more multi-shots
+            Applied !applied ->
+              if effOnCtor
+                then takeComputEffect applied etsCtor $ \case
+                  Left (!effected, !results) ->
+                    -- effect on ctor is final, this is a one-shot computation
+                    ctorExit Nothing $
+                      HostStore $
+                        toDyn
+                          comput'
+                            { comput'thunk = Effected effected,
+                              comput'results = results
+                            }
+                  Right _result ->
+                    -- one effect shot is taken on ctor,
+                    -- subsequent calls can further take more multi-shots
+                    ctorExit Nothing $ HostStore $ toDyn comput'
+                else -- not to take effect on construction
                   ctorExit Nothing $ HostStore $ toDyn comput'
             _ ->
               -- leave it effected, or not fully applied
