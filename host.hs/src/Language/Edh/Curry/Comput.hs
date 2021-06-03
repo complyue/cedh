@@ -98,7 +98,7 @@ appliedFloatArg' ::
   AppliedArg
 appliedFloatArg' !anno !argName = AppliedArg anno argName $
   \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d -> exit val $ toDyn (fromRational (toRational d) :: a)
+    EdhDecimal !d -> exit val $ toDyn $ D.decimalToRealFloat @a d
     _ -> edhValueDesc ets val $ \ !badDesc ->
       throwEdh ets UsageError $
         anno <> " as number expected but given: " <> badDesc
@@ -707,16 +707,6 @@ effectedComput !obj = case edh'obj'store obj of
     _ -> Just dhs
   _ -> Nothing
 
-createComputObj ::
-  Typeable t =>
-  Object ->
-  AttrName ->
-  t ->
-  STM Object
-createComputObj !clsComput !ctorName !hostComput = do
-  let !comput = Comput ctorName (Unapplied $ toDyn hostComput) [] [] odEmpty
-  edhCreateHostObj clsComput comput
-
 createComputCtor ::
   Typeable t =>
   Object ->
@@ -776,13 +766,7 @@ createComputCtor'
                                 comput'effectful'args = effArgs,
                                 comput'results = results
                               }
-                    Right _result ->
-                      -- one effect shot is taken on ctor, as it returns an
-                      -- Edh value instead of Dynamic host value, the result
-                      -- object stays applied only, it can be subsequently
-                      -- called more times, to take multi-shots
-                      (exitEdh ets exit =<<) $
-                        EdhObject <$> edhCreateHostObj clsComput comput'
+                    Right !result -> exitEdh ets exit result
                 else -- not to take effect on construction
 
                   (exitEdh ets exit =<<) $
