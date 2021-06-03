@@ -1,5 +1,5 @@
 
-import * 'curry/Demo'
+import * 'curry/RT'
 
 
 {import _ 'repl'}.runREPL()
