@@ -24,12 +24,9 @@ installCurryBatteries !world =
       !clsComput <- defineComputClass moduScope
 
       let !moduArts = [(AttrByName "Comput", EdhObject clsComput)]
-      !artsDict <-
-        EdhDict
-          <$> createEdhDict [(attrKeyValue k, v) | (k, v) <- moduArts]
-      flip iopdUpdate (edh'scope'entity moduScope) $
-        [(k, v) | (k, v) <- moduArts]
-          ++ [(AttrByName "__exports__", artsDict)]
+      iopdUpdate moduArts $ edh'scope'entity moduScope
+      prepareExpStore ets (edh'scope'this moduScope) $ \ !esExps ->
+        iopdUpdate moduArts esExps
 
       exit
 
