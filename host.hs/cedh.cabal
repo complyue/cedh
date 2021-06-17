@@ -70,7 +70,6 @@ library
 executable cedh
   main-is:            Main.hs
   hs-source-dirs:     repl
-  other-modules:      Repl
   default-language:   Haskell2010
   default-extensions:
     NoImplicitPrelude
@@ -113,8 +112,6 @@ executable cedh
     , bytestring
     , cedh
     , edh
-    , ghc               >=8.8.3
-    , ghci
     , lossless-decimal
     , mtl
     , stm               >=2.5
