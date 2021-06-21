@@ -348,7 +348,7 @@ computArgDefault'' ::
   EdhValue ->
   (((EdhValue, t) -> EdhTx) -> EdhTx)
 computArgDefault'' !args !kwargs !callee !exit =
-  edhMakeCall callee (ArgsPack args $ odFromList kwargs) $ \ !val !ets -> do
+  edhMakeCall' callee (ArgsPack args $ odFromList kwargs) $ \ !val !ets -> do
     let badArg = edhValueDesc ets val $ \ !badDesc ->
           throwEdh ets UsageError $
             "bug: wrong host value constructed as default: " <> badDesc
