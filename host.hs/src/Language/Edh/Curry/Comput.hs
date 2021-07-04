@@ -745,7 +745,7 @@ createComputCtor'
             ((,Nothing) <$> ctorEffArgs)
             odEmpty
     mkHostProc outerScope EdhMethod ctorName $
-      (,WildReceiver) $
+      (,NullaryReceiver) $
         \ !apk !exit !ets -> applyComputArgs comput ets apk $ \ !comput' ->
           case comput'thunk comput' of
             Applied !applied ->
@@ -786,9 +786,9 @@ defineComputClass !clsOuterScope =
             | (nm, vc, hp) <-
                 [ ("(@)", EdhMethod, wrapHostProc argReadProc),
                   ("([])", EdhMethod, wrapHostProc argReadProc),
-                  ("__repr__", EdhMethod, (reprProc, PackReceiver [])),
-                  ("__show__", EdhMethod, (showProc, PackReceiver [])),
-                  ("__call__", EdhMethod, (callProc, WildReceiver))
+                  ("__repr__", EdhMethod, wrapHostProc reprProc),
+                  ("__show__", EdhMethod, wrapHostProc showProc),
+                  ("__call__", EdhMethod, wrapHostProc callProc)
                 ]
           ]
       iopdUpdate mths $ edh'scope'entity clsScope
