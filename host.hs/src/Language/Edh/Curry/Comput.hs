@@ -11,7 +11,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique
 import GHC.Conc (unsafeIOToSTM)
-import Language.Edh.Curry.Shim
 import Language.Edh.EHI
 import Type.Reflection
 import Prelude
@@ -376,65 +375,88 @@ computArgDefault'' !args !kwargs !callee !exit =
 
 -- * Host representation of scriptable computations
 
+class HostComput c where
+  performComput ::
+    c ->
+    EdhThreadState ->
+    (Either (Dynamic, KwArgs) EdhValue -> STM ()) ->
+    STM ()
+
 -- | Computation to be performed
---
--- todo the constructors should be hidden, with ctor functions available to
---      the users
-data ComputTBP
-  = ComputDone !Dynamic
-  | ComputIO !Dynamic
-  | ComputIO' !(IO Dynamic)
-  | ComputSTM !Dynamic
-  | ComputSTM' !(STM Dynamic)
-  | ComputEdh (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
-  | ComputEdhSTM (EdhTxExit EdhValue -> EdhTx)
-  | ComputEdhIO (EdhThreadState -> IO EdhValue)
-  | InflateEdh (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
+data ComputTBP = forall c. HostComput c => ComputTBP !c
 
-computDone :: forall a. Typeable a => a -> ComputTBP
-computDone = ComputDone . toDyn
+data ComputDone a = (Typeable a) => ComputDone !a
 
-computDone' :: Dynamic -> ComputTBP
-computDone' = ComputDone
+instance HostComput (ComputDone a) where
+  performComput (ComputDone !done) _ets !exit =
+    exit $ Left (toDyn done, odEmpty)
 
-computIO :: forall a. Typeable a => IO a -> ComputTBP
-computIO = ComputIO . toDyn
+data ComputEdh a
+  = Typeable a => ComputEdh (EdhThreadState -> (a -> STM ()) -> STM ())
 
-computIO' :: IO Dynamic -> ComputTBP
-computIO' = ComputIO'
+instance HostComput (ComputEdh a) where
+  performComput (ComputEdh !act) !ets !exit =
+    act ets $ exit . Left . (,odEmpty) . toDyn
 
-computSTM :: forall a. Typeable a => STM a -> ComputTBP
-computSTM = ComputSTM . toDyn
+newtype ComputEdh' a
+  = ComputEdh' (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
 
-computSTM' :: STM Dynamic -> ComputTBP
-computSTM' = ComputSTM'
+instance HostComput (ComputEdh' a) where
+  performComput (ComputEdh' !act) !ets !exit =
+    act ets $ exit . Left . (,odEmpty)
 
-computEdh ::
-  forall a.
-  Typeable a =>
-  (EdhThreadState -> (a -> STM ()) -> STM ()) ->
-  ComputTBP
-computEdh !c = ComputEdh $ \ !ets !exit -> c ets $ \ !a -> exit (toDyn a)
+newtype ComputEdh''
+  = ComputEdh'' (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
 
-computEdh' ::
-  (EdhThreadState -> (Dynamic -> STM ()) -> STM ()) ->
-  ComputTBP
-computEdh' = ComputEdh
+instance HostComput ComputEdh'' where
+  performComput (ComputEdh'' !act) !ets !exit =
+    act ets $ exit . Right
 
--- | Result can't be returned on comput object construction, while the
--- constructed comput object can always mult-shot by subsequent calls
-computEdhSTM :: (EdhTxExit EdhValue -> EdhTx) -> ComputTBP
-computEdhSTM = ComputEdhSTM
+data InflateEdh
+  = forall a.
+    Typeable a =>
+    InflateEdh (EdhThreadState -> (a -> KwArgs -> STM ()) -> STM ())
 
--- | Result can't be returned on comput object construction, while the
--- constructed comput object can always mult-shot by subsequent calls
-computEdhIO :: (EdhThreadState -> IO EdhValue) -> ComputTBP
-computEdhIO = ComputEdhIO
+instance HostComput InflateEdh where
+  performComput (InflateEdh !act) !ets !exit =
+    act ets $ \ !done !extras -> exit $ Left (toDyn done, extras)
 
-inflateEdh ::
-  (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ()) ->
-  ComputTBP
-inflateEdh = InflateEdh
+newtype InflateEdh' a
+  = InflateEdh' (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
+
+instance HostComput (InflateEdh' a) where
+  performComput (InflateEdh' !act) !ets !exit =
+    act ets $ \ !done !extras -> exit $ Left (done, extras)
+
+data ComputIO a = Typeable a => ComputIO (IO a)
+
+instance HostComput (ComputIO a) where
+  performComput (ComputIO !ioa) !ets !exit = runEdhTx ets $
+    edhContIO $ do
+      !done <- ioa
+      atomically $ exit $ Left (toDyn done, odEmpty)
+
+newtype ComputIO' = ComputIO' (IO EdhValue)
+
+instance HostComput ComputIO' where
+  performComput (ComputIO' !ioa) !ets !exit =
+    runEdhTx ets $
+      edhContIO $ ioa >>= atomically . exit . Right
+
+data ComputSTM a = Typeable a => ComputSTM (STM a)
+
+instance HostComput (ComputSTM a) where
+  performComput (ComputSTM !stma) !ets !exit = runEdhTx ets $
+    edhContSTM $ do
+      !done <- stma
+      exit $ Left (toDyn done, odEmpty)
+
+newtype ComputSTM' = ComputSTM' (STM EdhValue)
+
+instance HostComput ComputSTM' where
+  performComput (ComputSTM' !stma) !ets !exit =
+    runEdhTx ets $
+      edhContSTM $ stma >>= exit . Right
 
 -- | The thunk of a computation can be in 3 different stages:
 -- - Unapplied
@@ -476,36 +498,7 @@ takeComputEffect ::
   STM ()
 takeComputEffect !effected !ets !exit = case fromDynamic effected of
   Nothing -> exit $ Left (effected, odEmpty)
-  Just (tbp :: ComputTBP) -> case tbp of
-    ComputDone !done -> exit $ Left (done, odEmpty)
-    ComputIO !dynIO ->
-      runEdhTx ets $
-        edhContIO $
-          dynPerformIO dynTypeBug dynIO >>= \ !effected' ->
-            atomically $ exit $ Left (effected', odEmpty)
-    ComputIO' !ioa ->
-      runEdhTx ets $
-        edhContIO $
-          ioa >>= \ !effected' ->
-            atomically $ exit $ Left (effected', odEmpty)
-    ComputSTM !dynSTM ->
-      edhContSTM'' ets $
-        dynPerformSTM dynTypeBug dynSTM
-          >>= \ !effected' -> exit $ Left (effected', odEmpty)
-    ComputSTM' !stma ->
-      edhContSTM'' ets $
-        stma >>= \ !effected' -> exit $ Left (effected', odEmpty)
-    ComputEdh !act ->
-      act ets $ \ !effected' -> exit $ Left (effected', odEmpty)
-    ComputEdhSTM !act ->
-      runEdhTx ets $ act $ \ !result _ets -> exit $ Right result
-    ComputEdhIO !act ->
-      runEdhTx ets $
-        edhContIO $ act ets >>= \ !result -> atomically $ exit $ Right result
-    InflateEdh !act ->
-      act ets $ \ !effected' !results -> exit $ Left (effected', results)
-  where
-    dynTypeBug = error "bug: comput dyn type mismatch"
+  Just (ComputTBP !tbp) -> performComput tbp ets exit
 
 applyComputArgs ::
   Comput ->
