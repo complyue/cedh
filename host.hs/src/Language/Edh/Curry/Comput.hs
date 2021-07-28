@@ -720,6 +720,17 @@ effectedComput !obj = case edh'obj'store obj of
     _ -> Just dhs
   _ -> Nothing
 
+-- | Define an Edh method procedure to construct a curried host computation as
+-- an Edh object, such an object can be subsequently called, with more
+-- arguments to apply, to obtain new objects honoring those arguments, until
+-- the list of 'AppliedArg' gets fulfilled, in which case the final effect will
+-- be realized.
+--
+-- It's not enforced by the type system, but you must supply the host
+-- computation with the type @t@ being a Haskell function, taking exactly
+-- @length appliedArgs + length effectfulArgs@ argument(s), and giving a result
+-- of type @c@, which having a `HostComput` instance. Failing in any of above,
+-- you'll end up with runtime errors.
 createComputCtor ::
   forall c t.
   (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
@@ -732,6 +743,24 @@ createComputCtor ::
   STM EdhValue
 createComputCtor = createComputCtor' @c True
 
+-- | Define an Edh method procedure to construct a curried host computation as
+-- an Edh object, such an object can be subsequently called, with more
+-- arguments to apply, to obtain new objects honoring those arguments, until
+-- the list of 'AppliedArg' gets fulfilled, in which case the final effect will
+-- be realized.
+--
+-- The first @effOnCtor@ argument indicates whether effect should be taken on
+-- construction (i.e. first call) against the defined Edh method procedure:
+-- It won't fire anyway if no enough applied args are supplied by the caller;
+-- otherwise, if @effOnCtor@ is `False`, the result object must be called later
+-- (with a niladic apk in this case) to realize its effect.
+-- Anyway, effectful argument(s) are only obtained upon the effecting call.
+--
+-- It's not enforced by the type system, but you must supply the host
+-- computation with the type @t@ being a Haskell function, taking exactly
+-- @length appliedArgs + length effectfulArgs@ argument(s), and giving a result
+-- of type @c@, which having a `HostComput` instance. Failing in any of above,
+-- you'll end up with runtime errors.
 createComputCtor' ::
   forall c t.
   (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
