@@ -398,12 +398,14 @@ class HostComput c where
 -- | Computation to be performed
 data ComputTBP = forall c. HostComput c => ComputTBP !c
 
+-- | Wrap a pure computation result as scripted
 data ComputDone a = (Typeable a) => ComputDone !a
 
 instance HostComput (ComputDone a) where
   performComput (ComputDone !done) _ets !exit =
     exit $ Left (toDyn done, odEmpty)
 
+-- | Wrap an Edh aware computation result as scripted
 data ComputEdh a
   = Typeable a => ComputEdh (EdhThreadState -> (a -> STM ()) -> STM ())
 
@@ -411,6 +413,9 @@ instance HostComput (ComputEdh a) where
   performComput (ComputEdh !act) !ets !exit =
     act ets $ exit . Left . (,odEmpty) . toDyn
 
+-- | Wrap an Edh aware computation result as scripted
+--
+-- Use this form in case you construct a 'Dynamic' result yourself
 newtype ComputEdh' a
   = ComputEdh' (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
 
@@ -418,6 +423,9 @@ instance HostComput (ComputEdh' a) where
   performComput (ComputEdh' !act) !ets !exit =
     act ets $ exit . Left . (,odEmpty)
 
+-- | Wrap an Edh aware computation result as scripted
+--
+-- Use this form in case you can give out an 'EdhValue' directly
 newtype ComputEdh''
   = ComputEdh'' (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
 
@@ -425,6 +433,9 @@ instance HostComput ComputEdh'' where
   performComput (ComputEdh'' !act) !ets !exit =
     act ets $ exit . Right
 
+-- | Wrap an Edh aware computation result as scripted, and you would give out
+-- one or more named results in addition, those can be separately obtained by
+-- the script at will
 data InflateEdh a
   = Typeable a =>
     InflateEdh (EdhThreadState -> (a -> KwArgs -> STM ()) -> STM ())
@@ -433,6 +444,11 @@ instance HostComput (InflateEdh a) where
   performComput (InflateEdh !act) !ets !exit =
     act ets $ \ !done !extras -> exit $ Left (toDyn done, extras)
 
+-- | Wrap an Edh aware computation result as scripted, and you would give out
+-- one or more named results in addition, those can be separately obtained by
+-- the script at will
+--
+-- Use this form in case you construct a 'Dynamic' result yourself
 newtype InflateEdh' a
   = InflateEdh' (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
 
@@ -440,6 +456,7 @@ instance HostComput (InflateEdh' a) where
   performComput (InflateEdh' !act) !ets !exit =
     act ets $ \ !done !extras -> exit $ Left (done, extras)
 
+-- | Wrap a general effectful computation in the 'IO' monad
 data ComputIO a = Typeable a => ComputIO (IO a)
 
 instance HostComput (ComputIO a) where
@@ -448,6 +465,9 @@ instance HostComput (ComputIO a) where
       !done <- ioa
       atomically $ exit $ Left (toDyn done, odEmpty)
 
+-- | Wrap a general effectful computation in the 'IO' monad
+--
+-- Use this form in case you can give out an 'EdhValue' directly
 newtype ComputIO' = ComputIO' (IO EdhValue)
 
 instance HostComput ComputIO' where
@@ -455,6 +475,7 @@ instance HostComput ComputIO' where
     runEdhTx ets $
       edhContIO $ ioa >>= atomically . exit . Right
 
+-- | Wrap a general effectful computation in the 'STM' monad
 data ComputSTM a = Typeable a => ComputSTM (STM a)
 
 instance HostComput (ComputSTM a) where
@@ -463,6 +484,9 @@ instance HostComput (ComputSTM a) where
       !done <- stma
       exit $ Left (toDyn done, odEmpty)
 
+-- | Wrap a general effectful computation in the 'STM' monad
+--
+-- Use this form in case you can give out an 'EdhValue' directly
 newtype ComputSTM' = ComputSTM' (STM EdhValue)
 
 instance HostComput ComputSTM' where
@@ -484,7 +508,7 @@ instance HostComput ComputSTM' where
 --     effectful arguments have been collected and applied as well.
 data ComputThunk = Unapplied !Dynamic | Applied !Dynamic | Effected !Dynamic
 
--- | Everything in Haskell is a computation, let's make everything scriptable
+-- | Everything in Haskell is a computation, let's make many scriptable
 --
 -- And with dynamic effects
 data Comput = Comput
