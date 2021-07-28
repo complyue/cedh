@@ -158,6 +158,10 @@ appliedHostSeqArg' !typeName !argName !dmap = AppliedArg typeName argName $
         badArgElem elemVal = edhValueDesc ets elemVal $ \ !badDesc ->
           throwEdh ets UsageError $
             "host objects " <> typeName <> " expected but one is: " <> badDesc
+        badHostElemArg dd =
+          throwEdh ets UsageError $
+            "host objects " <> typeName <> " expected but one is host value: "
+              <> T.pack (show dd)
         parseElements :: [(Object, t)] -> [EdhValue] -> STM ()
         parseElements results [] = runEdhTx ets $
           dmap val (reverse $! results) $ \(!val', !dd) _ets -> exit val' dd
@@ -168,11 +172,11 @@ appliedHostSeqArg' !typeName !argName !dmap = AppliedArg typeName argName $
                 case comput'thunk comput of
                   Effected !effected -> case fromDynamic effected of
                     Just (d :: t) -> parseElements ((obj, d) : results) rest
-                    Nothing -> badElem
+                    Nothing -> badHostElemArg effected
                   Applied !applied | null (comput'effectful'args comput) ->
                     case fromDynamic applied of
                       Just (d :: t) -> parseElements ((obj, d) : results) rest
-                      Nothing -> badElem
+                      Nothing -> badHostElemArg applied
                   _ -> edhValueDesc ets val $ \ !badDesc ->
                     throwEdh ets UsageError $
                       "comput given for " <> attrKeyStr argName
@@ -180,7 +184,7 @@ appliedHostSeqArg' !typeName !argName !dmap = AppliedArg typeName argName $
                         <> badDesc
               Nothing -> case fromDynamic dd of
                 Just (d :: t) -> parseElements ((obj, d) : results) rest
-                Nothing -> badElem
+                Nothing -> badHostElemArg dd
             _ -> badElem
           _ -> badElem
           where
@@ -210,6 +214,10 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
     let badArg = edhValueDesc ets val $ \ !badDesc ->
           throwEdh ets UsageError $
             "host " <> typeName <> " object expected but given: " <> badDesc
+        badHostArg dd =
+          throwEdh ets UsageError $
+            "host " <> typeName <> " object expected but given host value: "
+              <> T.pack (show dd)
     case edhUltimate val of
       EdhObject !obj -> case edh'obj'store obj of
         HostStore !dd -> case fromDynamic dd of
@@ -218,12 +226,12 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
               Effected !effected -> case fromDynamic effected of
                 Just (d :: t) -> runEdhTx ets $
                   dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                Nothing -> badArg
+                Nothing -> badHostArg effected
               Applied !applied | null (comput'effectful'args comput) ->
                 case fromDynamic applied of
                   Just (d :: t) -> runEdhTx ets $
                     dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                  Nothing -> badArg
+                  Nothing -> badHostArg applied
               _ -> edhValueDesc ets val $ \ !badDesc ->
                 throwEdh ets UsageError $
                   "comput given for " <> attrKeyStr argName
@@ -232,7 +240,7 @@ appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
           Nothing -> case fromDynamic dd of
             Just (d :: t) -> runEdhTx ets $
               dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-            Nothing -> badArg
+            Nothing -> badHostArg dd
         _ -> badArg
       _ -> badArg
 
@@ -292,6 +300,11 @@ performHostArg''' !typeName !argName !effDefault !dmap =
                     "effectful host " <> typeName
                       <> " object expected but given: "
                       <> badDesc
+                badHostArg dd =
+                  throwEdh ets UsageError $
+                    "host " <> typeName
+                      <> " object expected but given host value: "
+                      <> T.pack (show dd)
             case edhUltimate val of
               EdhObject !obj -> case edh'obj'store obj of
                 HostStore !dd -> case fromDynamic dd of
@@ -302,14 +315,14 @@ performHostArg''' !typeName !argName !effDefault !dmap =
                           runEdhTx ets $
                             dmap val obj d $
                               \(!val', !dd') _ets -> exit val' dd'
-                        Nothing -> badArg
+                        Nothing -> badHostArg effected
                       Applied !applied | null (comput'effectful'args comput) ->
                         case fromDynamic applied of
                           Just (d :: t) ->
                             runEdhTx ets $
                               dmap val obj d $
                                 \(!val', !dd') _ets -> exit val' dd'
-                          Nothing -> badArg
+                          Nothing -> badHostArg applied
                       _ -> edhValueDesc ets val $ \ !badDesc ->
                         throwEdh ets UsageError $
                           "comput given for " <> attrKeyStr argName
@@ -319,7 +332,7 @@ performHostArg''' !typeName !argName !effDefault !dmap =
                     Just (d :: t) ->
                       runEdhTx ets $
                         dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                    Nothing -> badArg
+                    Nothing -> badHostArg dd
                 _ -> badArg
               _ -> badArg
 
@@ -412,12 +425,11 @@ instance HostComput ComputEdh'' where
   performComput (ComputEdh'' !act) !ets !exit =
     act ets $ exit . Right
 
-data InflateEdh
-  = forall a.
-    Typeable a =>
+data InflateEdh a
+  = Typeable a =>
     InflateEdh (EdhThreadState -> (a -> KwArgs -> STM ()) -> STM ())
 
-instance HostComput InflateEdh where
+instance HostComput (InflateEdh a) where
   performComput (InflateEdh !act) !ets !exit =
     act ets $ \ !done !extras -> exit $ Left (toDyn done, extras)
 
@@ -478,6 +490,11 @@ data ComputThunk = Unapplied !Dynamic | Applied !Dynamic | Effected !Dynamic
 data Comput = Comput
   { -- | Suggested constructor name
     comput'ctor'name :: !AttrName,
+    -- | Wrapping the computation, once fully effected, as to be performed
+    --
+    -- within the 'Dynamic', it should be a:
+    --   @forall c. HostComput c => c -> ComputTBP@
+    comput'wrapper :: !Dynamic,
     -- | Thunk in possibly different stages
     comput'thunk :: !ComputThunk,
     -- | Formal arguments to be applied, with all or partial values collected
@@ -491,15 +508,6 @@ data Comput = Comput
 
 -- * Host computation manipulation utilities
 
-takeComputEffect ::
-  Dynamic ->
-  EdhThreadState ->
-  (Either (Dynamic, KwArgs) EdhValue -> STM ()) ->
-  STM ()
-takeComputEffect !effected !ets !exit = case fromDynamic effected of
-  Nothing -> exit $ Left (effected, odEmpty)
-  Just (ComputTBP !tbp) -> performComput tbp ets exit
-
 applyComputArgs ::
   Comput ->
   EdhThreadState ->
@@ -507,20 +515,20 @@ applyComputArgs ::
   (Comput -> STM ()) ->
   STM ()
 applyComputArgs
-  comput@(Comput !ctorName !thunk !appliedArgs !effectfulArgs !results)
+  comput@(Comput !ctorName !hcw !thunk !appliedArgs !effectfulArgs !results)
   !ets
   apk@(ArgsPack !args !kwargs)
   !exit = case thunk of
     Unapplied !unapplied -> applyArgs appliedArgs $ \ !appliedArgs' ->
       allApplied [] appliedArgs' >>= \case
         Nothing ->
-          exit $
-            Comput ctorName thunk appliedArgs' effectfulArgs results
+          exit $ Comput ctorName hcw thunk appliedArgs' effectfulArgs results
         Just !dds -> case hostApply 0 dds unapplied of
           Right !applied ->
             exit $
               Comput
                 ctorName
+                hcw
                 (Applied applied)
                 appliedArgs'
                 effectfulArgs
@@ -630,6 +638,7 @@ applyComputArgs
 effectComput ::
   EdhThreadState ->
   Dynamic ->
+  Dynamic ->
   [(EffectfulArg, Maybe (EdhValue, Dynamic))] ->
   ( Either
       (Dynamic, [(EffectfulArg, Maybe (EdhValue, Dynamic))], KwArgs)
@@ -637,7 +646,7 @@ effectComput ::
     STM ()
   ) ->
   STM ()
-effectComput !ets !applied !effArgs !exit =
+effectComput !ets !hcWrapper !applied !effArgs !exit =
   seqcontSTM (extractEffArg <$> effArgs) $
     \ !effs -> do
       let effArgs' =
@@ -647,7 +656,6 @@ effectComput !ets !applied !effArgs !exit =
               )
               effArgs
               effs
-
       case hostApply 0 effs applied of
         Left !nArgApplied ->
           seqcontSTM (effRepr <$> drop nArgApplied effArgs) $ \ !effsRepr ->
@@ -656,10 +664,22 @@ effectComput !ets !applied !effArgs !exit =
               UsageError
               $ "some effectful argument not applicable:\n"
                 <> T.unlines effsRepr
-        Right !applied' -> takeComputEffect applied' ets $ \case
-          Left (!effected, !results) ->
-            exit $ Left (effected, effArgs', results)
-          Right !result -> exit $ Right result
+        Right !applied' -> case dynApply hcWrapper applied' of
+          Nothing ->
+            throwEdh
+              ets
+              UsageError
+              $ "the host computation wrapper not applicable:\n"
+                <> T.pack (show hcWrapper)
+          Just !wrapped -> case fromDynamic wrapped of
+            Nothing ->
+              -- this is only possible if we relax the constraint on the
+              -- wrapper, which mandates 'ComputTBP' result atm
+              exit $ Left (wrapped, effArgs', odEmpty)
+            Just (ComputTBP !tbp) -> performComput tbp ets $ \case
+              Left (effected, result) ->
+                exit $ Left (effected, effArgs', result)
+              Right !result -> exit $ Right result
   where
     extractEffArg ::
       (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
@@ -701,7 +721,8 @@ effectedComput !obj = case edh'obj'store obj of
   _ -> Nothing
 
 createComputCtor ::
-  Typeable t =>
+  forall c t.
+  (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
   Object ->
   AttrName ->
   [AppliedArg] ->
@@ -709,10 +730,11 @@ createComputCtor ::
   t ->
   Scope ->
   STM EdhValue
-createComputCtor = createComputCtor' True
+createComputCtor = createComputCtor' @c True
 
 createComputCtor' ::
-  Typeable t =>
+  forall c t.
+  (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
   Bool ->
   Object ->
   AttrName ->
@@ -733,6 +755,7 @@ createComputCtor'
     let !comput =
           Comput
             ctorName
+            (toDyn $ ComputTBP @c)
             (Unapplied $ toDyn hostComput)
             ((,Nothing) <$> ctorAppArgs)
             ((,Nothing) <$> ctorEffArgs)
@@ -745,6 +768,7 @@ createComputCtor'
               if effOnCtor
                 then effectComput
                   ets
+                  (comput'wrapper comput')
                   applied
                   (comput'effectful'args comput')
                   $ \case
@@ -793,7 +817,7 @@ defineComputClass !clsOuterScope =
     -- Obtain an argument by name
     argReadProc :: EdhValue -> EdhHostProc
     argReadProc !keyVal !exit !ets = withThisHostObj ets $
-      \(Comput _ctorName _thunk !appliedArgs effArgs !results) ->
+      \(Comput _ctorName _hcw _thunk !appliedArgs effArgs !results) ->
         edhValueAsAttrKey ets keyVal $ \ !argKey ->
           case odLookup argKey results of
             Just !val -> exitEdh ets exit val
@@ -832,7 +856,7 @@ defineComputClass !clsOuterScope =
 
     reprProc :: ArgsPack -> EdhHostProc
     reprProc _ !exit !ets = withThisHostObj ets $
-      \(Comput !ctorName _thunk !appliedArgs effArgs !results) -> do
+      \(Comput !ctorName _hcw _thunk !appliedArgs effArgs !results) -> do
         let withEffsPart :: (Text -> STM ()) -> STM ()
             withEffsPart !exit' = case effArgs of
               [] -> exit' ""
@@ -886,7 +910,7 @@ defineComputClass !clsOuterScope =
 
     showProc :: ArgsPack -> EdhHostProc
     showProc _ !exit !ets = withThisHostObj ets $
-      \(Comput !ctorName !thunk !appliedArgs effArgs !results) -> do
+      \(Comput !ctorName _hcw !thunk !appliedArgs effArgs !results) -> do
         let withResults :: (Text -> STM ()) -> STM ()
             withResults !exit' = case odToList results of
               [] -> exit' ""
@@ -960,23 +984,28 @@ defineComputClass !clsOuterScope =
       \ !comput -> applyComputArgs comput ets apk $ \ !comput' ->
         case comput'thunk comput' of
           Applied !applied ->
-            effectComput ets applied (comput'effectful'args comput') $ \case
-              Left (!effected, !effArgs, !results) -> do
-                !newOid <- unsafeIOToSTM newUnique
-                exitEdh ets exit $
-                  EdhObject
-                    this
-                      { edh'obj'ident = newOid,
-                        edh'obj'store =
-                          HostStore $
-                            toDyn
-                              comput'
-                                { comput'thunk = Effected effected,
-                                  comput'effectful'args = effArgs,
-                                  comput'results = results
-                                }
-                      }
-              Right !result -> exitEdh ets exit result
+            effectComput
+              ets
+              (comput'wrapper comput')
+              applied
+              (comput'effectful'args comput')
+              $ \case
+                Left (!effected, !effArgs, !results) -> do
+                  !newOid <- unsafeIOToSTM newUnique
+                  exitEdh ets exit $
+                    EdhObject
+                      this
+                        { edh'obj'ident = newOid,
+                          edh'obj'store =
+                            HostStore $
+                              toDyn
+                                comput'
+                                  { comput'thunk = Effected effected,
+                                    comput'effectful'args = effArgs,
+                                    comput'results = results
+                                  }
+                        }
+                Right !result -> exitEdh ets exit result
           _ -> do
             !newOid <- unsafeIOToSTM newUnique
             exitEdh ets exit $
