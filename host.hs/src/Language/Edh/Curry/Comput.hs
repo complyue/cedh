@@ -726,6 +726,10 @@ effectedComput !obj = case edh'obj'store obj of
 -- the list of 'AppliedArg' gets fulfilled, in which case the final effect will
 -- be realized.
 --
+-- If all @[AppliedArg]@ are supplied on construction (i.e. the direct call
+-- against the defined method procedure), it'll immediately take effect, with
+-- all @[EffectfulArg]@ resolved against the calling context.
+--
 -- It's not enforced by the type system, but you must supply the host
 -- computation with the type @t@ being a Haskell function, taking exactly
 -- @length appliedArgs + length effectfulArgs@ argument(s), and giving a result
@@ -754,7 +758,8 @@ createComputCtor = createComputCtor' @c True
 -- It won't fire anyway if no enough applied args are supplied by the caller;
 -- otherwise, if @effOnCtor@ is `False`, the result object must be called later
 -- (with a niladic apk in this case) to realize its effect.
--- Anyway, effectful argument(s) are only obtained upon the effecting call.
+-- Anyway, effectful argument(s) are only resolved upon the effecting call,
+-- against that particular call context.
 --
 -- It's not enforced by the type system, but you must supply the host
 -- computation with the type @t@ being a Haskell function, taking exactly
