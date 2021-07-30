@@ -24,6 +24,7 @@ source-repository head
 library
   exposed-modules:    Language.Edh.Curry
   other-modules:
+    Language.Edh.Curry.Args
     Language.Edh.Curry.Comput
     Language.Edh.Curry.Shim
 

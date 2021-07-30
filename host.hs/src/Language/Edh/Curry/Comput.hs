@@ -7,13 +7,107 @@ import Control.Monad
 import Data.Dynamic
 import qualified Data.Lossless.Decimal as D
 import Data.Maybe
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique
 import GHC.Conc (unsafeIOToSTM)
+import GHC.TypeLits
+import Language.Edh.Curry.Args
 import Language.Edh.EHI
 import Type.Reflection
 import Prelude
+
+class ScriptArgAdapter a where
+  adaptEdhArg :: EdhValue -> EdhTxExit a -> EdhTx
+  adaptedArgValue :: a -> EdhValue
+
+class ScriptableComput c where
+  callByScript :: c -> ArgsPack -> EdhTxExit ScriptedResult -> EdhTx
+
+data ScriptedResult
+  = -- | The computation done with a sole Edh value
+    ScriptDone !EdhValue
+  | -- | Partially applied host computation
+    -- as well as intermediate data as named values
+    forall c. ScriptableComput c => PartiallyApplied !c !KwArgs
+  | -- | Fully applied host computation, pending effected yet
+    -- It has to be called again with niladic apk to take effect.
+    -- By "take effect", it'll really resolve effectful arguments from the
+    -- call site, as the last time it can be called
+    forall c. ScriptableComput c => FullyApplied !c !KwArgs
+  | -- | The computation is finally done, but keep the result as a host value
+    -- as well as other named result values
+    forall d. Typeable d => FullyEffected !d !KwArgs
+
+data PendingComput name a v c
+  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+    PendingComput !KwArgs !(ScriptArg a name -> c)
+
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (PendingComput name a v c)
+  where
+  callByScript (PendingComput !pargs !f) (ArgsPack !args !kwargs) !exit =
+    undefined
+
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (ScriptArg a name -> c)
+  where
+  callByScript f (ArgsPack !args !kwargs) !exit =
+    case odTakeOut argName kwargs of
+      (Just !av, !kwargs') -> adaptEdhArg av $ \ !ad ->
+        callByScript (f $ ScriptArg ad) (ArgsPack args kwargs') $ \case
+          ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+          PartiallyApplied c !results ->
+            exitEdhTx exit $
+              PartiallyApplied c $
+                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+          FullyApplied c !results ->
+            exitEdhTx exit $
+              FullyApplied c $
+                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+          FullyEffected d !results ->
+            exitEdhTx exit $
+              FullyEffected d $
+                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+      (Nothing, !kwargs') -> case args of
+        av : args' -> adaptEdhArg av $ \ !ad ->
+          callByScript (f $ ScriptArg ad) (ArgsPack args' kwargs') $ \case
+            ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+            PartiallyApplied c !results ->
+              exitEdhTx exit $
+                PartiallyApplied c $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+            FullyApplied c !results ->
+              exitEdhTx exit $
+                FullyApplied c $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+            FullyEffected d !results ->
+              exitEdhTx exit $
+                FullyEffected d $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+        [] ->
+          exitEdhTx exit $ PartiallyApplied (PendingComput kwargs' f) odEmpty
+    where
+      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+
+instance
+  (ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (a -> c)
+  where
+  callByScript c (ArgsPack !args !kwargs) !exit = case args of
+    av : args' -> adaptEdhArg av $ \ !ad ->
+      callByScript (c ad) (ArgsPack args' kwargs) exit
+    _ -> throwEdhTx UsageError "missing positional arg"
+
+instance ScriptableComput (ComputDone a) where
+  callByScript (ComputDone a) (ArgsPack !args !kwargs) !exit
+    | null args && odNull kwargs = exitEdhTx exit $ FullyEffected a odEmpty
+    | otherwise = throwEdhTx UsageError "extranous arguments"
+
+-- * XXX
 
 type AnnoText = Text
 
