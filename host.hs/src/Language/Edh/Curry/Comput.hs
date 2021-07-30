@@ -336,9 +336,9 @@ performHostArg''' !typeName !argName !effDefault !dmap =
                 _ -> badArg
               _ -> badArg
 
--- * utilities providing argument default value, by constructing object of the
+-- * Utilities
 
--- designated comput class
+-- providing argument default value, by constructing object of the designated comput class
 
 computArgDefault ::
   forall t. Typeable t => EdhValue -> (((EdhValue, t) -> EdhTx) -> EdhTx)
