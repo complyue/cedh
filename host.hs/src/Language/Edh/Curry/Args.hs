@@ -3,6 +3,7 @@
 
 module Language.Edh.Curry.Args
   ( ScriptArg (..),
+    Effective (..),
     scriptArgName,
     type (@:),
     type ($:),
@@ -19,25 +20,25 @@ import qualified Data.Text as T
 import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
 import Prelude
 
-newtype ScriptArg (t :: Type) (name :: Symbol) = ScriptArg t
+newtype ScriptArg (a :: Type) (name :: Symbol) = ScriptArg a
 
 scriptArgName :: forall (name :: Symbol). KnownSymbol name => Text
 scriptArgName = T.pack $ symbolVal (Proxy :: Proxy name)
 
-data Effected t = Effective !t | NonEffect
+data Effective a = InEffect !a | NonEffect
 
-type name @: t = ScriptArg t name
+type name @: a = ScriptArg a name
 
-type name $: t = ScriptArg (Effected t) name
+type name $: a = ScriptArg (Effective a) name
 
-pattern ComputArg :: t -> name @: t
-pattern ComputArg t = ScriptArg t
+pattern ComputArg :: a -> name @: a
+pattern ComputArg a = ScriptArg a
 
 {-# COMPLETE ComputArg #-}
 
-appliedArg :: name @: t -> t
+appliedArg :: name @: a -> a
 appliedArg (ScriptArg a) = a
 
-effectfulArg :: name $: t -> Maybe t
-effectfulArg (ScriptArg (Effective a)) = Just a
+effectfulArg :: name $: a -> Maybe a
+effectfulArg (ScriptArg (InEffect a)) = Just a
 effectfulArg (ScriptArg NonEffect) = Nothing

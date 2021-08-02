@@ -1,4 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ImplicitParams #-}
 
 module Language.Edh.Curry.Comput where
 
@@ -18,13 +19,16 @@ import Language.Edh.EHI
 import Type.Reflection
 import Prelude
 
-class ScriptArgAdapter a where
-  adaptEdhArg :: EdhValue -> EdhTxExit a -> EdhTx
-  adaptedArgValue :: a -> EdhValue
-
+-- | Scriptable Computation
 class ScriptableComput c where
-  callByScript :: c -> ArgsPack -> EdhTxExit ScriptedResult -> EdhTx
+  callByScript ::
+    (?effecting :: Bool) =>
+    c ->
+    ArgsPack ->
+    EdhTxExit ScriptedResult ->
+    EdhTx
 
+-- | Scripted Result
 data ScriptedResult
   = -- | The computation done with a sole Edh value
     ScriptDone !EdhValue
@@ -40,17 +44,69 @@ data ScriptedResult
     -- as well as other named result values
     forall d. Typeable d => FullyEffected !d !KwArgs
 
-data PendingComput name a v c
-  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
-    PendingComput !KwArgs !(ScriptArg a name -> c)
+-- | Argument Type that can be adapted from script values
+class ScriptArgAdapter a where
+  adaptEdhArg :: EdhValue -> EdhTxExit a -> EdhTx
+  adaptedArgValue :: a -> EdhValue
 
+-- | Scriptable Computation that waiting one more arg to be applied
+--
+-- this enables currying, by representing partially applied computation as
+-- 1st class value
+data PendingApplied name a v c
+  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+    PendingApplied !KwArgs !(ScriptArg a name -> c)
+
+-- | apply one more arg to a previously saved, partially applied computation
 instance
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
-  ScriptableComput (PendingComput name a v c)
+  ScriptableComput (PendingApplied name a v c)
   where
-  callByScript (PendingComput !pargs !f) (ArgsPack !args !kwargs) !exit =
-    undefined
+  callByScript (PendingApplied !pargs !f) (ArgsPack !args !kwargs) !exit =
+    case odTakeOut argName kwargs of
+      (Just !av, !kwargs') -> adaptEdhArg av $ \ !ad ->
+        callByScript
+          (f $ ScriptArg ad)
+          (ArgsPack args $ odUnion pargs kwargs')
+          $ \case
+            ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+            PartiallyApplied c !results ->
+              exitEdhTx exit $
+                PartiallyApplied c $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+            FullyApplied c !results ->
+              exitEdhTx exit $
+                FullyApplied c $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+            FullyEffected d !results ->
+              exitEdhTx exit $
+                FullyEffected d $
+                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+      (Nothing, !kwargs') -> case args of
+        av : args' -> adaptEdhArg av $ \ !ad ->
+          callByScript
+            (f $ ScriptArg ad)
+            (ArgsPack args' $ odUnion pargs kwargs')
+            $ \case
+              ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              PartiallyApplied c !results ->
+                exitEdhTx exit $
+                  PartiallyApplied c $
+                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+              FullyApplied c !results ->
+                exitEdhTx exit $
+                  FullyApplied c $
+                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+              FullyEffected d !results ->
+                exitEdhTx exit $
+                  FullyEffected d $
+                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+        [] ->
+          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) odEmpty
+    where
+      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
 
+-- | apply one more arg to a scriptable computation
 instance
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (ScriptArg a name -> c)
@@ -89,10 +145,72 @@ instance
                 FullyEffected d $
                   odUnion (odFromList [(argName, adaptedArgValue ad)]) results
         [] ->
-          exitEdhTx exit $ PartiallyApplied (PendingComput kwargs' f) odEmpty
+          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) odEmpty
     where
       argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
 
+-- | Scriptable Computation that waiting to take effect
+data PendingEffected name a c
+  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+    PendingEffected !(ScriptArg (Effective a) name -> c)
+
+-- | resolve then apply one more effectful arg to previously saved, now
+-- effecting computation
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (PendingEffected name a c)
+  where
+  callByScript p@(PendingEffected !f) (ArgsPack !args !kwargs) !exit
+    | not $ null args = throwEdhTx UsageError "extranous args"
+    | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
+    | not ?effecting = exitEdhTx exit $ FullyApplied p odEmpty
+    | otherwise = applyEffectfulArg f exit
+
+-- | resolve then apply one more effectful arg to the effecting computation
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (ScriptArg (Effective a) name -> c)
+  where
+  callByScript !f (ArgsPack !args !kwargs) !exit
+    | not $ null args = throwEdhTx UsageError "extranous args"
+    | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
+    | not ?effecting =
+      exitEdhTx exit $ FullyApplied (PendingEffected f) odEmpty
+    | otherwise = applyEffectfulArg f exit
+
+-- | resolve then apply one more effectful arg to the effecting computation
+applyEffectfulArg ::
+  forall name a c.
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  (ScriptArg (Effective a) name -> c) ->
+  EdhTxExit ScriptedResult ->
+  EdhTx
+applyEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
+  let ?effecting = True
+   in case maybeVal of
+        Nothing ->
+          callByScript (f $ ScriptArg NonEffect) (ArgsPack [] odEmpty) $ \case
+            ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+            FullyEffected d !results ->
+              exitEdhTx exit $ FullyEffected d results
+            _ -> error "bug: not fully effected"
+        Just !av -> adaptEdhArg av $ \ !ad ->
+          callByScript
+            (f $ ScriptArg $ InEffect ad)
+            (ArgsPack [] odEmpty)
+            $ \case
+              ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              FullyEffected d !results ->
+                exitEdhTx exit $
+                  FullyEffected d $
+                    odUnion
+                      (odFromList [(argName, adaptedArgValue ad)])
+                      results
+              _ -> error "bug: not fully effected"
+  where
+    argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+
+-- | apply one more anonymous/positional arg to a computation
 instance
   (ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (a -> c)
@@ -102,6 +220,7 @@ instance
       callByScript (c ad) (ArgsPack args' kwargs) exit
     _ -> throwEdhTx UsageError "missing positional arg"
 
+-- | Pure computation result
 instance ScriptableComput (ComputDone a) where
   callByScript (ComputDone a) (ArgsPack !args !kwargs) !exit
     | null args && odNull kwargs = exitEdhTx exit $ FullyEffected a odEmpty
