@@ -25,7 +25,7 @@ newtype ScriptArg (a :: Type) (name :: Symbol) = ScriptArg a
 scriptArgName :: forall (name :: Symbol). KnownSymbol name => Text
 scriptArgName = T.pack $ symbolVal (Proxy :: Proxy name)
 
-data Effective a = InEffect !a | NonEffect
+newtype Effective a = Effective a
 
 type name @: a = ScriptArg a name
 
@@ -39,6 +39,5 @@ pattern ComputArg a = ScriptArg a
 appliedArg :: name @: a -> a
 appliedArg (ScriptArg a) = a
 
-effectfulArg :: name $: a -> Maybe a
-effectfulArg (ScriptArg (InEffect a)) = Just a
-effectfulArg (ScriptArg NonEffect) = Nothing
+effectfulArg :: name $: a -> a
+effectfulArg (ScriptArg (Effective a)) = a

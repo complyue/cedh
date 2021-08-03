@@ -16,11 +16,13 @@ import GHC.Conc (unsafeIOToSTM)
 import GHC.TypeLits
 import Language.Edh.Curry.Args
 import Language.Edh.EHI
-import Type.Reflection
+import Type.Reflection (typeRep)
 import Prelude
 
 -- | Scriptable Computation
 class ScriptableComput c where
+  scriptableArgs :: c -> [ScriptArgDecl]
+
   callByScript ::
     (?effecting :: Bool) =>
     c ->
@@ -28,27 +30,46 @@ class ScriptableComput c where
     EdhTxExit ScriptedResult ->
     EdhTx
 
+  argsScriptedAhead :: c -> KwArgs
+  argsScriptedAhead _ = odEmpty
+
+-- | Arg declaration, auto generated intermediate details, to provide meta
+-- information to scripting environment
+data ScriptArgDecl = ScriptArgDecl !IfEffectful !AttrKey !TypeName
+
+type IfEffectful = Bool
+
+type TypeName = Text
+
 -- | Scripted Result
 data ScriptedResult
-  = -- | The computation done with a sole Edh value
+  = -- | The computation done with a sole Edh value, though it can be a rather
+    -- complex object on its own
     ScriptDone !EdhValue
-  | -- | Partially applied host computation
-    -- as well as intermediate data as named values
-    forall c. ScriptableComput c => PartiallyApplied !c !KwArgs
-  | -- | Fully applied host computation, pending effected yet
-    -- It has to be called again with niladic apk to take effect.
-    -- By "take effect", it'll really resolve effectful arguments from the
-    -- call site, as the last time it can be called
-    forall c. ScriptableComput c => FullyApplied !c !KwArgs
-  | -- | The computation is finally done, but keep the result as a host value
-    -- as well as other named result values
-    forall d. Typeable d => FullyEffected !d !KwArgs
-  | -- | The computation is finally done, but keep the result as a host value
-    -- as well as other named result values
-    FullyEffected' !Dynamic !KwArgs
+  | -- | The computation done with a sole host value, and it intends to be
+    -- recognizable by general Edh code, even not aware of 'ScriptedResult'
+    ScriptDone' !Dynamic
+  | -- | Partially applied host computation, with all args ever applied
+    forall c.
+    ScriptableComput c =>
+    PartiallyApplied !c ![(ScriptArgDecl, EdhValue)]
+  | -- | Fully applied host computation, with all args ever applied
+    --
+    -- It's pending effected yet, thus has to be called again with niladic apk
+    -- to take effect. By "taking effect", it'll really resolve effectful
+    -- arguments from that call site.
+    forall c.
+    ScriptableComput c =>
+    FullyApplied !c ![(ScriptArgDecl, EdhValue)]
+  | -- | The computation is finally done, with the result as a host value plus
+    -- extra named result values, and with all args ever applied
+    FullyEffected !Dynamic !KwArgs ![(ScriptArgDecl, EdhValue)]
 
 -- | Argument Type that can be adapted from script values
-class ScriptArgAdapter a where
+class Typeable a => ScriptArgAdapter a where
+  adaptedArgType :: Text
+  adaptedArgType = T.pack $ show $ typeRep @a
+
   adaptEdhArg :: EdhValue -> EdhTxExit a -> EdhTx
   adaptedArgValue :: a -> EdhValue
 
@@ -65,6 +86,10 @@ instance
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (PendingApplied name a v c)
   where
+  argsScriptedAhead (PendingApplied !pargs _f) = pargs
+
+  scriptableArgs (PendingApplied _pargs !f) = scriptableArgs f
+
   callByScript (PendingApplied !pargs !f) (ArgsPack !args !kwargs) !exit =
     case odTakeOut argName kwargs of
       (Just !av, !kwargs') -> adaptEdhArg av $ \ !ad ->
@@ -73,22 +98,18 @@ instance
           (ArgsPack args $ odUnion pargs kwargs')
           $ \case
             ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-            PartiallyApplied c !results ->
+            ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
+            PartiallyApplied c !appliedArgs ->
               exitEdhTx exit $
                 PartiallyApplied c $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyApplied c !results ->
+                  (argDecl, adaptedArgValue ad) : appliedArgs
+            FullyApplied c !appliedArgs ->
               exitEdhTx exit $
-                FullyApplied c $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyEffected d !results ->
+                FullyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+            FullyEffected d extras !appliedArgs ->
               exitEdhTx exit $
-                FullyEffected d $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyEffected' d !results ->
-              exitEdhTx exit $
-                FullyEffected d $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+                FullyEffected d extras $
+                  (argDecl, adaptedArgValue ad) : appliedArgs
       (Nothing, !kwargs') -> case args of
         av : args' -> adaptEdhArg av $ \ !ad ->
           callByScript
@@ -96,77 +117,141 @@ instance
             (ArgsPack args' $ odUnion pargs kwargs')
             $ \case
               ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-              PartiallyApplied c !results ->
+              ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
+              PartiallyApplied c !appliedArgs ->
                 exitEdhTx exit $
                   PartiallyApplied c $
-                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-              FullyApplied c !results ->
+                    (argDecl, adaptedArgValue ad) : appliedArgs
+              FullyApplied c !appliedArgs ->
                 exitEdhTx exit $
-                  FullyApplied c $
-                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-              FullyEffected d !results ->
+                  FullyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+              FullyEffected d extras !appliedArgs ->
                 exitEdhTx exit $
-                  FullyEffected d $
-                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-              FullyEffected' d !results ->
-                exitEdhTx exit $
-                  FullyEffected d $
-                    odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+                  FullyEffected d extras $
+                    (argDecl, adaptedArgValue ad) : appliedArgs
         [] ->
-          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) odEmpty
+          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) []
     where
       argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argDecl = ScriptArgDecl False argName (adaptedArgType @a)
 
 -- | apply one more arg to a scriptable computation
 instance
+  {-# OVERLAPPABLE #-}
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (ScriptArg a name -> c)
   where
+  scriptableArgs f =
+    ScriptArgDecl False argName (adaptedArgType @a) :
+    scriptableArgs (f undefined)
+    where
+      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+
   callByScript f (ArgsPack !args !kwargs) !exit =
     case odTakeOut argName kwargs of
       (Just !av, !kwargs') -> adaptEdhArg av $ \ !ad ->
         callByScript (f $ ScriptArg ad) (ArgsPack args kwargs') $ \case
           ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-          PartiallyApplied c !results ->
+          ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
+          PartiallyApplied c !appliedArgs ->
             exitEdhTx exit $
-              PartiallyApplied c $
-                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-          FullyApplied c !results ->
+              PartiallyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+          FullyApplied c !appliedArgs ->
             exitEdhTx exit $
-              FullyApplied c $
-                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-          FullyEffected d !results ->
+              FullyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+          FullyEffected d extras !appliedArgs ->
             exitEdhTx exit $
-              FullyEffected d $
-                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-          FullyEffected' d !results ->
-            exitEdhTx exit $
-              FullyEffected d $
-                odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+              FullyEffected d extras $ (argDecl, adaptedArgValue ad) : appliedArgs
       (Nothing, !kwargs') -> case args of
         av : args' -> adaptEdhArg av $ \ !ad ->
           callByScript (f $ ScriptArg ad) (ArgsPack args' kwargs') $ \case
             ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-            PartiallyApplied c !results ->
+            ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
+            PartiallyApplied c !appliedArgs ->
               exitEdhTx exit $
-                PartiallyApplied c $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyApplied c !results ->
+                PartiallyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+            FullyApplied c !appliedArgs ->
               exitEdhTx exit $
-                FullyApplied c $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyEffected d !results ->
+                FullyApplied c $ (argDecl, adaptedArgValue ad) : appliedArgs
+            FullyEffected d extras !appliedArgs ->
               exitEdhTx exit $
-                FullyEffected d $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
-            FullyEffected' d !results ->
-              exitEdhTx exit $
-                FullyEffected d $
-                  odUnion (odFromList [(argName, adaptedArgValue ad)]) results
+                FullyEffected d extras $ (argDecl, adaptedArgValue ad) : appliedArgs
         [] ->
-          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) odEmpty
+          exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) []
     where
       argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argDecl = ScriptArgDecl False argName (adaptedArgType @a)
+
+-- | Scriptable Computation that waiting to take effect
+data PendingMaybeEffected name a c
+  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+    PendingMaybeEffected !(ScriptArg (Effective (Maybe a)) name -> c)
+
+-- | resolve then apply one more effectful arg to previously saved, now
+-- effecting computation
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (PendingMaybeEffected name a c)
+  where
+  scriptableArgs (PendingMaybeEffected !f) = scriptableArgs f
+
+  callByScript p@(PendingMaybeEffected !f) (ArgsPack !args !kwargs) !exit
+    | not $ null args = throwEdhTx UsageError "extranous args"
+    | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
+    | not ?effecting = exitEdhTx exit $ FullyApplied p []
+    | otherwise = applyMaybeEffectfulArg f exit
+
+-- | resolve then apply one more effectful arg to the effecting computation
+instance
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ScriptableComput (ScriptArg (Effective (Maybe a)) name -> c)
+  where
+  scriptableArgs f =
+    ScriptArgDecl True argName (T.pack (show $ typeRep @(Maybe a))) :
+    scriptableArgs (f undefined)
+    where
+      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+
+  callByScript !f (ArgsPack !args !kwargs) !exit
+    | not $ null args = throwEdhTx UsageError "extranous args"
+    | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
+    | not ?effecting =
+      exitEdhTx exit $ FullyApplied (PendingMaybeEffected f) []
+    | otherwise = applyMaybeEffectfulArg f exit
+
+-- | resolve then apply one more effectful arg to the effecting computation
+applyMaybeEffectfulArg ::
+  forall name a c.
+  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  (ScriptArg (Effective (Maybe a)) name -> c) ->
+  EdhTxExit ScriptedResult ->
+  EdhTx
+applyMaybeEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
+  let ?effecting = True
+   in case maybeVal of
+        Nothing ->
+          callByScript
+            (f $ ScriptArg $ Effective Nothing)
+            (ArgsPack [] odEmpty)
+            $ \case
+              ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              FullyEffected d extras !appliedArgs ->
+                exitEdhTx exit $ FullyEffected d extras appliedArgs
+              _ -> error "bug: not fully effected"
+        Just !av -> adaptEdhArg av $ \ !ad ->
+          callByScript
+            (f $ ScriptArg $ Effective $ Just ad)
+            (ArgsPack [] odEmpty)
+            $ \case
+              ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              FullyEffected d extras !appliedArgs ->
+                exitEdhTx exit $
+                  FullyEffected d extras $
+                    (argDecl, adaptedArgValue ad) : appliedArgs
+              _ -> error "bug: not fully effected"
+  where
+    argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+    argDecl = ScriptArgDecl True argName (T.pack $ show $ typeRep @(Maybe a))
 
 -- | Scriptable Computation that waiting to take effect
 data PendingEffected name a c
@@ -179,22 +264,31 @@ instance
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (PendingEffected name a c)
   where
+  scriptableArgs (PendingEffected !f) = scriptableArgs f
+
   callByScript p@(PendingEffected !f) (ArgsPack !args !kwargs) !exit
     | not $ null args = throwEdhTx UsageError "extranous args"
     | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
-    | not ?effecting = exitEdhTx exit $ FullyApplied p odEmpty
+    | not ?effecting = exitEdhTx exit $ FullyApplied p []
     | otherwise = applyEffectfulArg f exit
 
 -- | resolve then apply one more effectful arg to the effecting computation
 instance
+  {-# OVERLAPPABLE #-}
   (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   ScriptableComput (ScriptArg (Effective a) name -> c)
   where
+  scriptableArgs f =
+    ScriptArgDecl True argName (T.pack $ show $ typeRep @a) :
+    scriptableArgs (f undefined)
+    where
+      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+
   callByScript !f (ArgsPack !args !kwargs) !exit
     | not $ null args = throwEdhTx UsageError "extranous args"
     | not $ odNull kwargs = throwEdhTx UsageError "extranous kwargs"
     | not ?effecting =
-      exitEdhTx exit $ FullyApplied (PendingEffected f) odEmpty
+      exitEdhTx exit $ FullyApplied (PendingEffected f) []
     | otherwise = applyEffectfulArg f exit
 
 -- | resolve then apply one more effectful arg to the effecting computation
@@ -208,36 +302,22 @@ applyEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
   let ?effecting = True
    in case maybeVal of
         Nothing ->
-          callByScript (f $ ScriptArg NonEffect) (ArgsPack [] odEmpty) $ \case
-            ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-            FullyEffected d !results ->
-              exitEdhTx exit $ FullyEffected d results
-            _ -> error "bug: not fully effected"
+          throwEdhTx UsageError $
+            "missing effectful arg: " <> attrKeyStr argName
         Just !av -> adaptEdhArg av $ \ !ad ->
           callByScript
-            (f $ ScriptArg $ InEffect ad)
+            (f $ ScriptArg $ Effective ad)
             (ArgsPack [] odEmpty)
             $ \case
               ScriptDone !done -> exitEdhTx exit $ ScriptDone done
-              FullyEffected d !results ->
+              FullyEffected d extras !appliedArgs ->
                 exitEdhTx exit $
-                  FullyEffected d $
-                    odUnion
-                      (odFromList [(argName, adaptedArgValue ad)])
-                      results
+                  FullyEffected d extras $
+                    (argDecl, adaptedArgValue ad) : appliedArgs
               _ -> error "bug: not fully effected"
   where
     argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
-
--- | apply one more anonymous/positional arg to a computation
-instance
-  (ScriptArgAdapter a, ScriptableComput c) =>
-  ScriptableComput (a -> c)
-  where
-  callByScript c (ArgsPack !args !kwargs) !exit = case args of
-    av : args' -> adaptEdhArg av $ \ !ad ->
-      callByScript (c ad) (ArgsPack args' kwargs) exit
-    _ -> throwEdhTx UsageError "missing positional arg"
+    argDecl = ScriptArgDecl True argName (T.pack $ show $ typeRep @a)
 
 -- * Computation result as base cases
 
@@ -245,20 +325,24 @@ instance
 data ComputDone a = (Typeable a) => ComputDone !a
 
 instance ScriptableComput (ComputDone a) where
+  scriptableArgs _ = []
   callByScript (ComputDone a) (ArgsPack !args !kwargs) !exit =
     if not (null args) || not (odNull kwargs)
       then throwEdhTx UsageError "extranous arguments"
-      else exitEdhTx exit $ FullyEffected a odEmpty
+      else exitEdhTx exit $ ScriptDone' (toDyn a)
 
 -- | Wrap an Edh aware computation result as scripted
 data ComputEdh a
   = Typeable a => ComputEdh (EdhThreadState -> (a -> STM ()) -> STM ())
 
 instance ScriptableComput (ComputEdh a) where
+  scriptableArgs _ = []
+
   callByScript (ComputEdh !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !a -> exitEdh ets exit $ FullyEffected a odEmpty
+      else act ets $ \ !a ->
+        exitEdh ets exit $ ScriptDone' (toDyn a)
 
 -- | Wrap an Edh aware computation result as scripted
 --
@@ -269,10 +353,12 @@ newtype ComputEdh' a
   = ComputEdh' (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
 
 instance ScriptableComput (ComputEdh' a) where
+  scriptableArgs _ = []
+
   callByScript (ComputEdh' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d -> exitEdh ets exit $ FullyEffected' d odEmpty
+      else act ets $ \ !d -> exitEdh ets exit $ ScriptDone' d
 
 -- | Wrap an Edh aware computation result as scripted
 --
@@ -281,6 +367,8 @@ newtype ComputEdh''
   = ComputEdh'' (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
 
 instance ScriptableComput ComputEdh'' where
+  scriptableArgs _ = []
+
   callByScript (ComputEdh'' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
@@ -294,11 +382,13 @@ data InflateEdh a
     InflateEdh (EdhThreadState -> (a -> KwArgs -> STM ()) -> STM ())
 
 instance ScriptableComput (InflateEdh a) where
+  scriptableArgs _ = []
+
   callByScript (InflateEdh !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d !results ->
-        exitEdh ets exit $ FullyEffected d results
+      else act ets $ \ !d !extras ->
+        exitEdh ets exit $ FullyEffected (toDyn d) extras []
 
 -- | Wrap an Edh aware computation result as scripted, and you would give out
 -- one or more named results in addition, those can be separately obtained by
@@ -309,23 +399,27 @@ newtype InflateEdh' a
   = InflateEdh' (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
 
 instance ScriptableComput (InflateEdh' a) where
+  scriptableArgs _ = []
+
   callByScript (InflateEdh' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d !results ->
-        exitEdh ets exit $ FullyEffected' d results
+      else act ets $ \ !d !extras ->
+        exitEdh ets exit $ FullyEffected d extras []
 
 -- | Wrap a general effectful computation in the 'IO' monad
 data ComputIO a = Typeable a => ComputIO (IO a)
 
 instance ScriptableComput (ComputIO a) where
+  scriptableArgs _ = []
+
   callByScript (ComputIO !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else runEdhTx ets $
         edhContIO $ do
           !d <- act
-          atomically $ exitEdh ets exit $ FullyEffected d odEmpty
+          atomically $ exitEdh ets exit $ ScriptDone' (toDyn d)
 
 -- | Wrap a general effectful computation in the 'IO' monad
 --
@@ -335,13 +429,15 @@ instance ScriptableComput (ComputIO a) where
 data ComputIO' a = Typeable a => ComputIO' (IO Dynamic)
 
 instance ScriptableComput (ComputIO' a) where
+  scriptableArgs _ = []
+
   callByScript (ComputIO' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else runEdhTx ets $
         edhContIO $ do
           !d <- act
-          atomically $ exitEdh ets exit $ FullyEffected' d odEmpty
+          atomically $ exitEdh ets exit $ ScriptDone' d
 
 -- | Wrap a general effectful computation in the 'IO' monad
 --
@@ -349,6 +445,8 @@ instance ScriptableComput (ComputIO' a) where
 newtype ComputIO'' = ComputIO'' (IO EdhValue)
 
 instance ScriptableComput ComputIO'' where
+  scriptableArgs _ = []
+
   callByScript (ComputIO'' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
@@ -361,13 +459,15 @@ instance ScriptableComput ComputIO'' where
 data ComputSTM a = Typeable a => ComputSTM (STM a)
 
 instance ScriptableComput (ComputSTM a) where
+  scriptableArgs _ = []
+
   callByScript (ComputSTM !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else runEdhTx ets $
         edhContSTM $ do
           !d <- act
-          exitEdh ets exit $ FullyEffected d odEmpty
+          exitEdh ets exit $ ScriptDone' (toDyn d)
 
 -- | Wrap a general effectful computation in the 'STM' monad
 --
@@ -377,13 +477,15 @@ instance ScriptableComput (ComputSTM a) where
 newtype ComputSTM' a = ComputSTM' (STM Dynamic)
 
 instance ScriptableComput (ComputSTM' a) where
+  scriptableArgs _ = []
+
   callByScript (ComputSTM' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else runEdhTx ets $
         edhContSTM $ do
           !d <- act
-          exitEdh ets exit $ FullyEffected' d odEmpty
+          exitEdh ets exit $ ScriptDone' d
 
 -- | Wrap a general effectful computation in the 'STM' monad
 --
@@ -391,6 +493,8 @@ instance ScriptableComput (ComputSTM' a) where
 newtype ComputSTM'' = ComputSTM'' (STM EdhValue)
 
 instance ScriptableComput ComputSTM'' where
+  scriptableArgs _ = []
+
   callByScript (ComputSTM'' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
@@ -399,804 +503,420 @@ instance ScriptableComput ComputSTM'' where
           !v <- act
           exitEdh ets exit $ ScriptDone v
 
--- * XXX
+-- * Script Argument Adapters
 
-type AnnoText = Text
+instance ScriptArgAdapter EdhValue where
+  adaptEdhArg !v !exit = exitEdhTx exit v
+  adaptedArgValue = id
 
--- | An argument to be applied via formal application
---
--- The annotation text is for display purpose, it'd better correspond to some
--- class name as in the scripting environment, but not strictly enforced so.
---
--- The converter is responsible to convert arbitrary Edh value to a host value
--- wrapped as a 'Dynamic', when a matching argument is applied by scripting.
-data AppliedArg
-  = AppliedArg
-      !AnnoText
-      !AttrKey
-      (EdhThreadState -> EdhValue -> (EdhValue -> Dynamic -> STM ()) -> STM ())
-
--- | An argument to be additionally applied per each actual call
---
--- The extractor is responsible to obtain the effect argument value from
--- current environment, each time the underlying computation is called.
-data EffectfulArg
-  = EffectfulArg
-      !AnnoText
-      !AttrKey
-      (EdhThreadState -> (EdhValue -> Dynamic -> STM ()) -> STM ())
-
--- * utility arg parsing helpers
-
-appliedCountArg ::
-  forall a.
-  (Typeable a, Integral a) =>
-  AttrKey ->
-  AppliedArg
-appliedCountArg = appliedCountArg' @a "positive!int!DecimalType"
-
-appliedCountArg' ::
-  forall a.
-  (Typeable a, Integral a) =>
-  AnnoText ->
-  AttrKey ->
-  AppliedArg
-appliedCountArg' !anno !argName = AppliedArg anno argName $
-  \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d | d >= 1 -> case D.decimalToInteger d of
-      Just !i -> exit val $ toDyn (fromInteger i :: a)
-      Nothing -> edhValueDesc ets val $ \ !badDesc ->
-        throwEdh ets UsageError $
-          anno <> " as positive number expected but given: " <> badDesc
-    _ -> edhValueDesc ets val $ \ !badDesc ->
-      throwEdh ets UsageError $
-        anno <> " as positive number expected but given: " <> badDesc
-
-appliedIntArg :: forall a. (Typeable a, Integral a) => AttrKey -> AppliedArg
-appliedIntArg = appliedIntArg' @a "int!DecimalType"
-
-appliedIntArg' ::
-  forall a.
-  (Typeable a, Integral a) =>
-  AnnoText ->
-  AttrKey ->
-  AppliedArg
-appliedIntArg' !anno !argName = AppliedArg anno argName $
-  \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d -> case D.decimalToInteger d of
-      Just !i -> exit val $ toDyn (fromInteger i :: a)
-      Nothing -> edhValueDesc ets val $ \ !badDesc ->
-        throwEdh ets UsageError $
-          anno <> " as integer expected but given: " <> badDesc
-    _ -> edhValueDesc ets val $ \ !badDesc ->
-      throwEdh ets UsageError $
-        anno <> " as integer expected but given: " <> badDesc
-
-appliedFloatArg :: forall a. (Typeable a, RealFloat a) => AttrKey -> AppliedArg
-appliedFloatArg = appliedFloatArg' @a "DecimalType"
-
-appliedFloatArg' ::
-  forall a.
-  (Typeable a, RealFloat a) =>
-  AnnoText ->
-  AttrKey ->
-  AppliedArg
-appliedFloatArg' !anno !argName = AppliedArg anno argName $
-  \ !ets !val !exit -> case edhUltimate val of
-    EdhDecimal !d -> exit val $ toDyn $ D.decimalToRealFloat @a d
-    _ -> edhValueDesc ets val $ \ !badDesc ->
-      throwEdh ets UsageError $
-        anno <> " as number expected but given: " <> badDesc
-
-performFloatArg ::
-  forall a.
-  (Typeable a, RealFloat a) =>
-  AttrKey ->
-  EffectfulArg
-performFloatArg !argName =
-  performFloatArg' @a "DecimalType" argName $
-    const $
-      throwEdhTx UsageError $
-        "missing effectful argument: " <> attrKeyStr argName
-
-performFloatArg' ::
-  forall a.
-  (Typeable a, RealFloat a) =>
-  AnnoText ->
-  AttrKey ->
-  (((EdhValue, a) -> EdhTx) -> EdhTx) ->
-  EffectfulArg
-performFloatArg' !anno !argName !effDefault =
-  EffectfulArg anno argName $ \ !ets !exit ->
-    runEdhTx ets $
-      performEdhEffect' argName $ \ !maybeVal _ets ->
-        case edhUltimate <$> maybeVal of
-          Nothing ->
-            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit v $ toDyn d
-          Just !val -> do
-            let badArg = edhValueDesc ets val $ \ !badDesc ->
-                  throwEdh ets UsageError $
-                    "effectful number expected but given: "
-                      <> badDesc
-            case edhUltimate val of
-              EdhDecimal !d ->
-                exit val $ toDyn (fromRational (toRational d) :: a)
-              _ -> badArg
-
-appliedHostSeqArg :: forall t. Typeable t => AttrKey -> AppliedArg
-appliedHostSeqArg !argName = appliedHostSeqArg' @t typeName argName $
-  \ !val !ds !exit -> exitEdhTx exit (val, toDyn $! snd <$> ds)
-  where
-    typeName = T.pack $ "[" <> show (typeRep @t) <> "]"
-
-appliedHostSeqArg' ::
-  forall t.
-  Typeable t =>
-  AnnoText ->
-  AttrKey ->
-  (EdhValue -> [(Object, t)] -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
-  AppliedArg
-appliedHostSeqArg' !typeName !argName !dmap = AppliedArg typeName argName $
-  \ !ets !val !exit -> do
-    let badArg = edhValueDesc ets val $ \ !badDesc ->
-          throwEdh ets UsageError $
-            "host objects " <> typeName <> " expected but given: " <> badDesc
-        badArgElem elemVal = edhValueDesc ets elemVal $ \ !badDesc ->
-          throwEdh ets UsageError $
-            "host objects " <> typeName <> " expected but one is: " <> badDesc
-        badHostElemArg dd =
-          throwEdh ets UsageError $
-            "host objects " <> typeName <> " expected but one is host value: "
-              <> T.pack (show dd)
-        parseElements :: [(Object, t)] -> [EdhValue] -> STM ()
-        parseElements results [] = runEdhTx ets $
-          dmap val (reverse $! results) $ \(!val', !dd) _ets -> exit val' dd
-        parseElements results (elemVal : rest) = case edhUltimate elemVal of
-          EdhObject !obj -> case edh'obj'store obj of
-            HostStore !dd -> case fromDynamic dd of
-              Just !comput ->
-                case comput'thunk comput of
-                  Effected !effected -> case fromDynamic effected of
-                    Just (d :: t) -> parseElements ((obj, d) : results) rest
-                    Nothing -> badHostElemArg effected
-                  Applied !applied | null (comput'effectful'args comput) ->
-                    case fromDynamic applied of
-                      Just (d :: t) -> parseElements ((obj, d) : results) rest
-                      Nothing -> badHostElemArg applied
-                  _ -> edhValueDesc ets val $ \ !badDesc ->
-                    throwEdh ets UsageError $
-                      "comput given for " <> attrKeyStr argName
-                        <> " not effected, it is: "
-                        <> badDesc
-              Nothing -> case fromDynamic dd of
-                Just (d :: t) -> parseElements ((obj, d) : results) rest
-                Nothing -> badHostElemArg dd
-            _ -> badElem
-          _ -> badElem
-          where
-            badElem = badArgElem elemVal
-
-    case edhUltimate val of
-      EdhArgsPack (ArgsPack !args !kwargs)
-        | odNull kwargs -> parseElements [] args
-      EdhList (List _ !lv) -> readTVar lv >>= parseElements []
-      _ -> badArg
-
-appliedHostArg :: forall t. Typeable t => AttrKey -> AppliedArg
-appliedHostArg !argName = appliedHostArg' @t typeName argName $
-  \ !val _obj !d !exit -> exitEdhTx exit (val, toDyn d)
-  where
-    typeName = T.pack $ show (typeRep @t)
-
-appliedHostArg' ::
-  forall t.
-  Typeable t =>
-  AnnoText ->
-  AttrKey ->
-  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
-  AppliedArg
-appliedHostArg' !typeName !argName !dmap = AppliedArg typeName argName $
-  \ !ets !val !exit -> do
-    let badArg = edhValueDesc ets val $ \ !badDesc ->
-          throwEdh ets UsageError $
-            "host " <> typeName <> " object expected but given: " <> badDesc
-        badHostArg dd =
-          throwEdh ets UsageError $
-            "host " <> typeName <> " object expected but given host value: "
-              <> T.pack (show dd)
-    case edhUltimate val of
-      EdhObject !obj -> case edh'obj'store obj of
-        HostStore !dd -> case fromDynamic dd of
-          Just !comput ->
-            case comput'thunk comput of
-              Effected !effected -> case fromDynamic effected of
-                Just (d :: t) -> runEdhTx ets $
-                  dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                Nothing -> badHostArg effected
-              Applied !applied | null (comput'effectful'args comput) ->
-                case fromDynamic applied of
-                  Just (d :: t) -> runEdhTx ets $
-                    dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                  Nothing -> badHostArg applied
-              _ -> edhValueDesc ets val $ \ !badDesc ->
-                throwEdh ets UsageError $
-                  "comput given for " <> attrKeyStr argName
-                    <> " not effected, it is: "
-                    <> badDesc
-          Nothing -> case fromDynamic dd of
-            Just (d :: t) -> runEdhTx ets $
-              dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-            Nothing -> badHostArg dd
-        _ -> badArg
-      _ -> badArg
-
-performHostArg :: forall t. Typeable t => AttrKey -> EffectfulArg
-performHostArg !argName =
-  performHostArg' @t typeName argName $
-    const $
-      throwEdhTx UsageError $
-        "missing effectful argument: " <> attrKeyStr argName
-  where
-    typeName = T.pack $ show (typeRep @t)
-
-performHostArg' ::
-  forall t.
-  Typeable t =>
-  AnnoText ->
-  AttrKey ->
-  (((EdhValue, t) -> EdhTx) -> EdhTx) ->
-  EffectfulArg
-performHostArg' !typeName !argName !effDefault =
-  performHostArg''' typeName argName effDefault $
-    \ !val _obj !d !exit -> exitEdhTx exit (val, toDyn d)
-
-performHostArg'' ::
-  forall t.
-  Typeable t =>
-  AnnoText ->
-  AttrKey ->
-  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
-  EffectfulArg
-performHostArg'' !typeName !argName !dmap =
-  performHostArg''' @t typeName argName effDefault dmap
-  where
-    effDefault =
-      const $
+instance ScriptArgAdapter (Maybe Decimal) where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhDecimal !d -> exitEdhTx exit $ Just d
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
         throwEdhTx UsageError $
-          "missing effectful argument: " <> attrKeyStr argName
+          "optional "
+            <> adaptedArgType @Decimal
+            <> " expected but given: "
+            <> badDesc
+  adaptedArgValue (Just !d) = EdhDecimal d
+  adaptedArgValue Nothing = edhNothing
 
-performHostArg''' ::
-  forall t.
-  Typeable t =>
-  AnnoText ->
-  AttrKey ->
-  (((EdhValue, t) -> EdhTx) -> EdhTx) ->
-  (EdhValue -> Object -> t -> EdhTxExit (EdhValue, Dynamic) -> EdhTx) ->
-  EffectfulArg
-performHostArg''' !typeName !argName !effDefault !dmap =
-  EffectfulArg typeName argName $ \ !ets !exit ->
-    runEdhTx ets $
-      performEdhEffect' argName $ \ !maybeVal _ets ->
-        case edhUltimate <$> maybeVal of
-          Nothing ->
-            runEdhTx ets $ effDefault $ \(!v, !d) _ets -> exit v $ toDyn d
-          Just !val -> do
-            let badArg = edhValueDesc ets val $ \ !badDesc ->
-                  throwEdh ets UsageError $
-                    "effectful host " <> typeName
-                      <> " object expected but given: "
-                      <> badDesc
-                badHostArg dd =
-                  throwEdh ets UsageError $
-                    "host " <> typeName
-                      <> " object expected but given host value: "
-                      <> T.pack (show dd)
-            case edhUltimate val of
-              EdhObject !obj -> case edh'obj'store obj of
-                HostStore !dd -> case fromDynamic dd of
-                  Just !comput ->
-                    case comput'thunk comput of
-                      Effected !effected -> case fromDynamic effected of
-                        Just (d :: t) ->
-                          runEdhTx ets $
-                            dmap val obj d $
-                              \(!val', !dd') _ets -> exit val' dd'
-                        Nothing -> badHostArg effected
-                      Applied !applied | null (comput'effectful'args comput) ->
-                        case fromDynamic applied of
-                          Just (d :: t) ->
-                            runEdhTx ets $
-                              dmap val obj d $
-                                \(!val', !dd') _ets -> exit val' dd'
-                          Nothing -> badHostArg applied
-                      _ -> edhValueDesc ets val $ \ !badDesc ->
-                        throwEdh ets UsageError $
-                          "comput given for " <> attrKeyStr argName
-                            <> " not effected, it is: "
-                            <> badDesc
-                  Nothing -> case fromDynamic dd of
-                    Just (d :: t) ->
-                      runEdhTx ets $
-                        dmap val obj d $ \(!val', !dd') _ets -> exit val' dd'
-                    Nothing -> badHostArg dd
-                _ -> badArg
-              _ -> badArg
+instance ScriptArgAdapter Decimal where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhDecimal !d -> exitEdhTx exit d
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Decimal <> " expected but given: " <> badDesc
+  adaptedArgValue = EdhDecimal
+
+instance ScriptArgAdapter (Maybe Double) where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhDecimal !d -> exitEdhTx exit $ Just $ D.decimalToRealFloat d
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          "optional " <> adaptedArgType @Double
+            <> " expected but given: "
+            <> badDesc
+  adaptedArgValue (Just !d) = EdhDecimal $ D.decimalFromRealFloat d
+  adaptedArgValue Nothing = edhNothing
+
+instance ScriptArgAdapter Double where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhDecimal !d -> exitEdhTx exit $ D.decimalToRealFloat d
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Double <> " expected but given: " <> badDesc
+  adaptedArgValue = EdhDecimal . D.decimalFromRealFloat
+
+instance ScriptArgAdapter (Maybe Integer) where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhDecimal !d -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit $ Just i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          "optional " <> adaptedArgType @Integer
+            <> " expected but given: "
+            <> badDesc
+  adaptedArgValue (Just !i) = EdhDecimal $ fromIntegral i
+  adaptedArgValue Nothing = edhNothing
+
+instance ScriptArgAdapter Integer where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhDecimal !d -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Integer <> " expected but given: " <> badDesc
+  adaptedArgValue !i = EdhDecimal $ fromIntegral i
+
+instance ScriptArgAdapter (Maybe Int) where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhDecimal !d -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit $ Just $ fromInteger i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          "optional " <> adaptedArgType @Int
+            <> " expected but given: "
+            <> badDesc
+  adaptedArgValue (Just !i) = EdhDecimal $ fromIntegral i
+  adaptedArgValue Nothing = edhNothing
+
+instance ScriptArgAdapter Int where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhDecimal !d -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit $ fromInteger i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Int <> " expected but given: " <> badDesc
+  adaptedArgValue !i = EdhDecimal $ fromIntegral i
+
+newtype Count = Count Int
+
+instance ScriptArgAdapter (Maybe Count) where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhDecimal !d | d >= 1 -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit $ Just $ Count $ fromInteger i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Count
+            <> " (positive integer) expected but given: "
+            <> badDesc
+  adaptedArgValue (Just (Count !i)) = EdhDecimal $ fromIntegral i
+  adaptedArgValue Nothing = edhNothing
+
+instance ScriptArgAdapter Count where
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhDecimal !d | d >= 1 -> case D.decimalToInteger d of
+      Just !i -> exitEdhTx exit $ Count $ fromInteger i
+      Nothing -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @Count
+            <> " (positive integer) expected but given: "
+            <> badDesc
+  adaptedArgValue (Count !i) = EdhDecimal $ fromIntegral i
+
+data HostSeq t = Typeable t => HostSeq ![t] ![Object]
+
+instance Typeable t => ScriptArgAdapter (HostSeq t) where
+  adaptedArgType = T.pack $ "[" <> show (typeRep @t) <> "]"
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhArgsPack (ArgsPack !args !kwargs)
+      | odNull kwargs -> exitWith args
+    EdhList (List _u !lv) -> \ !ets ->
+      readTVar lv >>= \ !vs -> runEdhTx ets $ exitWith vs
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostSeq t) <> " expected but given: " <> badDesc
+      badElem ev = edhValueDescTx ev $ \ !badDesc ->
+        throwEdhTx UsageError $
+          T.pack (show $ typeRep @t)
+            <> " element expected but given: "
+            <> badDesc
+      exitWith :: [EdhValue] -> EdhTx
+      exitWith [] = exitEdhTx exit $ HostSeq [] []
+      exitWith !vs = go vs []
+        where
+          go :: [EdhValue] -> [(t, Object)] -> EdhTx
+          go [] rs = exitEdhTx exit $ uncurry HostSeq $ unzip $ reverse rs
+          go (ev : rest) rs = case edhUltimate ev of
+            EdhObject o -> case edh'obj'store o of
+              HostStore dd -> case fromDynamic dd of
+                Just (sr :: ScriptedResult) -> case sr of
+                  FullyEffected d _extras _applied -> case fromDynamic d of
+                    Just (t :: t) -> go rest ((t, o) : rs)
+                    Nothing -> badElem ev
+                  _ -> badElem ev
+                Nothing -> case fromDynamic dd of
+                  Just (t :: t) -> go rest ((t, o) : rs)
+                  Nothing -> badElem ev
+              _ -> badElem ev
+            _ -> badElem ev
+
+  adaptedArgValue (HostSeq _vals !objs) =
+    EdhArgsPack $ ArgsPack (EdhObject <$> objs) odEmpty
+
+data HostValue t = Typeable t => HostValue !t !Object
+
+instance Typeable t => ScriptArgAdapter (Maybe (HostValue t)) where
+  adaptedArgType = T.pack $ "Maybe " <> show (typeRep @t)
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhObject o -> case edh'obj'store o of
+      HostStore dd -> case fromDynamic dd of
+        Just (sr :: ScriptedResult) -> case sr of
+          FullyEffected d _extras _applied -> case fromDynamic d of
+            Just (t :: t) -> exitEdhTx exit $ Just $ HostValue t o
+            Nothing -> badVal
+          _ -> badVal
+        Nothing -> case fromDynamic dd of
+          Just (t :: t) -> exitEdhTx exit $ Just $ HostValue t o
+          Nothing -> badVal
+      _ -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostValue t) <> " expected but given: " <> badDesc
+
+  adaptedArgValue (Just (HostValue _val !obj)) = EdhObject obj
+  adaptedArgValue Nothing = edhNothing
+
+instance Typeable t => ScriptArgAdapter (HostValue t) where
+  adaptedArgType = T.pack $ show $ typeRep @t
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhObject o -> case edh'obj'store o of
+      HostStore dd -> case fromDynamic dd of
+        Just (sr :: ScriptedResult) -> case sr of
+          FullyEffected d _extras _applied -> case fromDynamic d of
+            Just (t :: t) -> exitEdhTx exit $ HostValue t o
+            Nothing -> badVal
+          _ -> badVal
+        Nothing -> case fromDynamic dd of
+          Just (t :: t) -> exitEdhTx exit $ HostValue t o
+          Nothing -> badVal
+      _ -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostValue t) <> " expected but given: " <> badDesc
+
+  adaptedArgValue (HostValue _val !obj) = EdhObject obj
 
 -- * Utilities
 
--- providing argument default value, by constructing object of the designated comput class
+-- providing argument default value, by constructing object of the designated
+-- comput class
 
-computArgDefault ::
-  forall t. Typeable t => EdhValue -> (((EdhValue, t) -> EdhTx) -> EdhTx)
-computArgDefault = computArgDefault' []
+appliedArgWithDefaultCtor ::
+  forall t name.
+  Typeable t =>
+  EdhValue ->
+  ScriptArg (Maybe (HostValue t)) name ->
+  EdhTxExit t ->
+  EdhTx
+appliedArgWithDefaultCtor = appliedArgWithDefaultCtor' []
 
-computArgDefault' ::
-  forall t.
+appliedArgWithDefaultCtor' ::
+  forall t name.
   Typeable t =>
   [EdhValue] ->
   EdhValue ->
-  (((EdhValue, t) -> EdhTx) -> EdhTx)
-computArgDefault' = flip computArgDefault'' []
+  ScriptArg (Maybe (HostValue t)) name ->
+  EdhTxExit t ->
+  EdhTx
+appliedArgWithDefaultCtor' = flip appliedArgWithDefaultCtor'' []
 
-computArgDefault'' ::
-  forall t.
+appliedArgWithDefaultCtor'' ::
+  forall t name.
   Typeable t =>
   [EdhValue] ->
   [(AttrKey, EdhValue)] ->
   EdhValue ->
-  (((EdhValue, t) -> EdhTx) -> EdhTx)
-computArgDefault'' !args !kwargs !callee !exit =
-  edhMakeCall' callee (ArgsPack args $ odFromList kwargs) $ \ !val !ets -> do
-    let badArg = edhValueDesc ets val $ \ !badDesc ->
-          throwEdh ets UsageError $
-            "bug: wrong host value constructed as default: " <> badDesc
-    case edhUltimate val of
-      EdhObject !obj -> case edh'obj'store obj of
-        HostStore !dd -> case fromDynamic dd of
-          Just !comput ->
-            case comput'thunk comput of
-              Effected !effected -> case fromDynamic effected of
-                Just (d :: t) ->
-                  runEdhTx ets $ exit (val, d)
-                Nothing -> badArg
-              Applied !applied | null (comput'effectful'args comput) ->
-                case fromDynamic applied of
-                  Just (d :: t) ->
-                    runEdhTx ets $ exit (val, d)
+  ScriptArg (Maybe (HostValue t)) name ->
+  EdhTxExit t ->
+  EdhTx
+appliedArgWithDefaultCtor''
+  !args
+  !kwargs
+  !callee
+  (appliedArg -> !maybeHostVal)
+  !exit = case maybeHostVal of
+    Just (HostValue (t :: t) _obj) -> exitEdhTx exit t
+    Nothing ->
+      edhMakeCall' callee (ArgsPack args $ odFromList kwargs) $
+        \ !val -> do
+          let badArg = edhValueDescTx val $ \ !badDesc ->
+                throwEdhTx UsageError $
+                  "bug: wrong host value constructed as default for "
+                    <> T.pack (show $ typeRep @t)
+                    <> ": "
+                    <> badDesc
+          case edhUltimate val of
+            EdhObject !o -> case edh'obj'store o of
+              HostStore dd -> case fromDynamic dd of
+                Just (sr :: ScriptedResult) -> case sr of
+                  FullyEffected d _extras _applied -> case fromDynamic d of
+                    Just (t :: t) -> exitEdhTx exit t
+                    Nothing -> badArg
+                  _ -> badArg
+                Nothing -> case fromDynamic dd of
+                  Just (t :: t) -> exitEdhTx exit t
                   Nothing -> badArg
               _ -> badArg
-          Nothing -> case fromDynamic dd of
-            Just (d :: t) ->
-              runEdhTx ets $ exit (val, d)
-            Nothing -> badArg
-        _ -> badArg
-      _ -> badArg
+            _ -> badArg
 
--- * Host representation of scriptable computations
+effectfulArgWithDefaultCtor ::
+  forall t name.
+  Typeable t =>
+  EdhValue ->
+  ScriptArg (Effective (Maybe (HostValue t))) name ->
+  EdhTxExit t ->
+  EdhTx
+effectfulArgWithDefaultCtor = effectfulArgWithDefaultCtor' []
 
-class HostComput c where
-  performComput ::
-    c ->
-    EdhThreadState ->
-    (Either (Dynamic, KwArgs) EdhValue -> STM ()) ->
-    STM ()
+effectfulArgWithDefaultCtor' ::
+  forall t name.
+  Typeable t =>
+  [EdhValue] ->
+  EdhValue ->
+  ScriptArg (Effective (Maybe (HostValue t))) name ->
+  EdhTxExit t ->
+  EdhTx
+effectfulArgWithDefaultCtor' = flip effectfulArgWithDefaultCtor'' []
 
--- | Computation to be performed
-data ComputTBP = forall c. HostComput c => ComputTBP !c
+effectfulArgWithDefaultCtor'' ::
+  forall t name.
+  Typeable t =>
+  [EdhValue] ->
+  [(AttrKey, EdhValue)] ->
+  EdhValue ->
+  ScriptArg (Effective (Maybe (HostValue t))) name ->
+  EdhTxExit t ->
+  EdhTx
+effectfulArgWithDefaultCtor''
+  !args
+  !kwargs
+  !callee
+  (effectfulArg -> !maybeVal)
+  !exit = case maybeVal of
+    Just (HostValue (t :: t) _obj) -> exitEdhTx exit t
+    Nothing ->
+      edhMakeCall' callee (ArgsPack args $ odFromList kwargs) $
+        \ !val -> do
+          let badArg = edhValueDescTx val $ \ !badDesc ->
+                throwEdhTx UsageError $
+                  "bug: wrong host value constructed as default for "
+                    <> T.pack (show $ typeRep @t)
+                    <> ": "
+                    <> badDesc
+          case edhUltimate val of
+            EdhObject !o -> case edh'obj'store o of
+              HostStore dd -> case fromDynamic dd of
+                Just (sr :: ScriptedResult) -> case sr of
+                  FullyEffected d _extras _applied -> case fromDynamic d of
+                    Just (t :: t) -> exitEdhTx exit t
+                    Nothing -> badArg
+                  _ -> badArg
+                Nothing -> case fromDynamic dd of
+                  Just (t :: t) -> exitEdhTx exit t
+                  Nothing -> badArg
+              _ -> badArg
+            _ -> badArg
 
-instance HostComput (ComputDone a) where
-  performComput (ComputDone !done) _ets !exit =
-    exit $ Left (toDyn done, odEmpty)
+-- * Defining a Curried Host Computation class
 
-instance HostComput (ComputEdh a) where
-  performComput (ComputEdh !act) !ets !exit =
-    act ets $ exit . Left . (,odEmpty) . toDyn
+type EffectOnCtor = Bool
 
-instance HostComput (ComputEdh' a) where
-  performComput (ComputEdh' !act) !ets !exit =
-    act ets $ exit . Left . (,odEmpty)
-
-instance HostComput ComputEdh'' where
-  performComput (ComputEdh'' !act) !ets !exit =
-    act ets $ exit . Right
-
-instance HostComput (InflateEdh a) where
-  performComput (InflateEdh !act) !ets !exit =
-    act ets $ \ !done !extras -> exit $ Left (toDyn done, extras)
-
-instance HostComput (InflateEdh' a) where
-  performComput (InflateEdh' !act) !ets !exit =
-    act ets $ \ !done !extras -> exit $ Left (done, extras)
-
-instance HostComput (ComputIO a) where
-  performComput (ComputIO !ioa) !ets !exit = runEdhTx ets $
-    edhContIO $ do
-      !done <- ioa
-      atomically $ exit $ Left (toDyn done, odEmpty)
-
-instance HostComput ComputIO'' where
-  performComput (ComputIO'' !ioa) !ets !exit =
-    runEdhTx ets $
-      edhContIO $ ioa >>= atomically . exit . Right
-
-instance HostComput (ComputSTM a) where
-  performComput (ComputSTM !stma) !ets !exit = runEdhTx ets $
-    edhContSTM $ do
-      !done <- stma
-      exit $ Left (toDyn done, odEmpty)
-
-instance HostComput ComputSTM'' where
-  performComput (ComputSTM'' !stma) !ets !exit =
-    runEdhTx ets $
-      edhContSTM $ stma >>= exit . Right
-
--- | The thunk of a computation can be in 3 different stages:
--- - Unapplied
---   - Only partial formal arguments have been collected,
---     the thunk has not been applied at all.
--- - Applied
---   - All formal arguments have been collected,
---     the thunk has been applied with all formal arguments, but not with
---     effectful arguments.
--- - Effected
---   - A fully applied computation has been called, this is the result,
---     the thunk is the result from a fully applied Comput get called,
---     effectful arguments have been collected and applied as well.
-data ComputThunk = Unapplied !Dynamic | Applied !Dynamic | Effected !Dynamic
-
--- | Everything in Haskell is a computation, let's make many scriptable
---
--- And with dynamic effects
-data Comput = Comput
-  { -- | Suggested constructor name
-    comput'ctor'name :: !AttrName,
-    -- | Wrapping the computation, once fully effected, as to be performed
-    --
-    -- within the 'Dynamic', it should be a:
-    --   @forall c. HostComput c => c -> ComputTBP@
-    comput'wrapper :: !Dynamic,
-    -- | Thunk in possibly different stages
-    comput'thunk :: !ComputThunk,
-    -- | Formal arguments to be applied, with all or partial values collected
-    comput'applied'args :: ![(AppliedArg, Maybe (EdhValue, Dynamic))],
-    -- | Effectful arguments to be additionally applied per each call, with
-    -- values collected in case of an effected computation.
-    comput'effectful'args :: ![(EffectfulArg, Maybe (EdhValue, Dynamic))],
-    -- | Results the computation actively yielded as it was effected
-    comput'results :: KwArgs
-  }
-
--- * Host computation manipulation utilities
-
-applyComputArgs ::
-  Comput ->
-  EdhThreadState ->
-  ArgsPack ->
-  (Comput -> STM ()) ->
-  STM ()
-applyComputArgs
-  comput@(Comput !ctorName !hcw !thunk !appliedArgs !effectfulArgs !results)
-  !ets
-  apk@(ArgsPack !args !kwargs)
-  !exit = case thunk of
-    Unapplied !unapplied -> applyArgs appliedArgs $ \ !appliedArgs' ->
-      allApplied [] appliedArgs' >>= \case
-        Nothing ->
-          exit $ Comput ctorName hcw thunk appliedArgs' effectfulArgs results
-        Just !dds -> case hostApply 0 dds unapplied of
-          Right !applied ->
-            exit $
-              Comput
-                ctorName
-                hcw
-                (Applied applied)
-                appliedArgs'
-                effectfulArgs
-                results
-          Left !nArgApplied ->
-            seqcontSTM (appliedRepr <$> drop nArgApplied appliedArgs') $
-              \ !appsRepr ->
-                throwEdh ets UsageError $
-                  "some computation argument not applicable:\n"
-                    <> T.unlines appsRepr
-    Applied {} ->
-      if null args && odNull kwargs
-        then exit comput
-        else edhValueRepr ets (EdhArgsPack apk) $ \ !badRepr ->
-          throwEdh ets UsageError $
-            "extranenous args to applied comput result:" <> badRepr
-    Effected {} ->
-      throwEdh ets UsageError "you don't call already effected computation"
-    where
-      hostApply :: Int -> [Dynamic] -> Dynamic -> Either Int Dynamic
-      hostApply _ [] !df = Right df
-      hostApply !nArgApplied (a : as) !df = case dynApply df a of
-        Nothing -> Left nArgApplied
-        Just !appliedSoFar -> hostApply (nArgApplied + 1) as appliedSoFar
-
-      allApplied ::
-        [Dynamic] ->
-        [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-        STM (Maybe [Dynamic])
-      allApplied got [] = return $ Just $! reverse got
-      allApplied _ ((_, Nothing) : _) = return Nothing
-      allApplied got ((_, Just (_, dd)) : rest) = allApplied (dd : got) rest
-
-      applyArgs ::
-        [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-        ([(AppliedArg, Maybe (EdhValue, Dynamic))] -> STM ()) ->
-        STM ()
-      applyArgs !pending !apkApplied =
-        applyKwArgs [] pending kwargs
-        where
-          applyPosArgs ::
-            [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-            [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-            [EdhValue] ->
-            STM ()
-          applyPosArgs passedArgs pendingArgs [] =
-            apkApplied $! reverse passedArgs ++ pendingArgs
-          applyPosArgs _ [] !extraArgs =
-            edhValueRepr ets (EdhArgsPack $ ArgsPack extraArgs odEmpty) $
-              \ !badApkRepr ->
-                throwEdh ets UsageError $ "extraneous args: " <> badApkRepr
-          applyPosArgs doneArgs (doneArg@(_, Just {}) : restArgs) pas =
-            applyPosArgs (doneArg : doneArgs) restArgs pas
-          applyPosArgs
-            doneArgs
-            ((aa@(AppliedArg _anno _name !cnvt), Nothing) : restArgs)
-            (pa : pas') =
-              cnvt ets pa $ \ !av !dd ->
-                applyPosArgs ((aa, Just (av, dd)) : doneArgs) restArgs pas'
-
-          applyKwArgs ::
-            [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-            [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-            KwArgs ->
-            STM ()
-          applyKwArgs passedArgs pendingArgs !kwas
-            | odNull kwas =
-              applyPosArgs [] (reverse passedArgs ++ pendingArgs) args
-            | otherwise = matchKwArgs passedArgs pendingArgs
-            where
-              matchKwArgs ::
-                [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-                [(AppliedArg, Maybe (EdhValue, Dynamic))] ->
-                STM ()
-              matchKwArgs _ [] =
-                edhValueRepr ets (EdhArgsPack $ ArgsPack [] kwas) $
-                  \ !badApkRepr ->
-                    throwEdh ets UsageError $
-                      "extraneous kwargs: " <> badApkRepr
-              matchKwArgs doneArgs (doneArg@(_, Just {}) : restArgs) =
-                matchKwArgs (doneArg : doneArgs) restArgs
-              matchKwArgs
-                doneArgs
-                ( doneArg@(aa@(AppliedArg _anno !name !cnvt), Nothing)
-                    : restArgs
-                  ) =
-                  case odTakeOut name kwas of
-                    (Nothing, kwas') ->
-                      applyKwArgs (doneArg : doneArgs) restArgs kwas'
-                    (Just !val, kwas') -> cnvt ets val $ \ !av !dd ->
-                      applyKwArgs
-                        ((aa, Just (av, dd)) : doneArgs)
-                        restArgs
-                        kwas'
-      appliedRepr ::
-        (AppliedArg, Maybe (EdhValue, Dynamic)) ->
-        (Text -> STM ()) ->
-        STM ()
-      appliedRepr (AppliedArg !anno !name _, Nothing) !exit' =
-        exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
-      appliedRepr (AppliedArg !anno !name _, Just (v, _d)) !exit' =
-        edhValueRepr ets v $ \ !vRepr ->
-          exit' $
-            "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
-              <> ","
-
-effectComput ::
-  EdhThreadState ->
-  Dynamic ->
-  Dynamic ->
-  [(EffectfulArg, Maybe (EdhValue, Dynamic))] ->
-  ( Either
-      (Dynamic, [(EffectfulArg, Maybe (EdhValue, Dynamic))], KwArgs)
-      EdhValue ->
-    STM ()
-  ) ->
-  STM ()
-effectComput !ets !hcWrapper !applied !effArgs !exit =
-  seqcontSTM (extractEffArg <$> effArgs) $
-    \ !effs -> do
-      let effArgs' =
-            zipWith
-              ( \(!ea, _) !av ->
-                  (ea, Just av)
-              )
-              effArgs
-              effs
-      case hostApply 0 effs applied of
-        Left !nArgApplied ->
-          seqcontSTM (effRepr <$> drop nArgApplied effArgs) $ \ !effsRepr ->
-            throwEdh
-              ets
-              UsageError
-              $ "some effectful argument not applicable:\n"
-                <> T.unlines effsRepr
-        Right !applied' -> case dynApply hcWrapper applied' of
-          Nothing ->
-            throwEdh
-              ets
-              UsageError
-              $ "the host computation wrapper not applicable:\n"
-                <> T.pack (show hcWrapper)
-          Just !wrapped -> case fromDynamic wrapped of
-            Nothing ->
-              -- this is only possible if we relax the constraint on the
-              -- wrapper, which mandates 'ComputTBP' result atm
-              exit $ Left (wrapped, effArgs', odEmpty)
-            Just (ComputTBP !tbp) -> performComput tbp ets $ \case
-              Left (effected, result) ->
-                exit $ Left (effected, effArgs', result)
-              Right !result -> exit $ Right result
+appliedArgByKey :: AttrKey -> [(ScriptArgDecl, EdhValue)] -> EdhValue
+appliedArgByKey k = go
   where
-    extractEffArg ::
-      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-      ((EdhValue, Dynamic) -> STM ()) ->
-      STM ()
-    extractEffArg (_, Just !got) = ($ got)
-    extractEffArg (EffectfulArg _anno _name !extractor, Nothing) =
-      \ !exit' -> extractor ets $ \ !av !dd -> exit' (av, dd)
+    go [] = nil
+    go ((ScriptArgDecl _eff !ak _type, val) : rest)
+      | ak == k = val
+      | otherwise = go rest
 
-    hostApply :: Int -> [(EdhValue, Dynamic)] -> Dynamic -> Either Int Dynamic
-    hostApply _ [] !df = Right df
-    hostApply !nArgApplied ((_v, a) : as) !df = case dynApply df a of
-      Nothing -> Left nArgApplied
-      Just !appliedSoFar -> hostApply (nArgApplied + 1) as appliedSoFar
-
-    effRepr ::
-      (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-      (Text -> STM ()) ->
-      STM ()
-    effRepr (EffectfulArg !anno !name _, Nothing) !exit' =
-      exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
-    effRepr (EffectfulArg !anno !name _, Just (v, _d)) !exit' =
-      edhValueRepr ets v $ \ !vRepr ->
-        exit' $
-          "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
-            <> ","
-
--- * Host comput classes, definition & usage
-
--- | Obtain the 'Dynamic' value of a host object, it can be an effected comput
--- or a raw host value
-effectedComput :: Object -> Maybe Dynamic
-effectedComput !obj = case edh'obj'store obj of
-  HostStore !dhs -> case fromDynamic dhs of
-    Just comput@Comput {} -> case comput'thunk comput of
-      Effected !effected -> Just effected
-      _ -> Nothing
-    _ -> Just dhs
-  _ -> Nothing
-
--- | Define an Edh method procedure to construct a curried host computation as
--- an Edh object, such an object can be subsequently called, with more
--- arguments to apply, to obtain new objects honoring those arguments, until
--- the list of 'AppliedArg' gets fulfilled, in which case the final effect will
--- be realized.
---
--- If all @[AppliedArg]@ are supplied on construction (i.e. the direct call
--- against the defined method procedure), it'll immediately take effect, with
--- all @[EffectfulArg]@ resolved against the calling context.
---
--- It's not enforced by the type system, but you must supply the host
--- computation with the type @t@ being a Haskell function, taking exactly
--- @length appliedArgs + length effectfulArgs@ argument(s), and giving a result
--- of type @c@, which having a `HostComput` instance. Failing in any of above,
--- you'll end up with runtime errors.
-createComputCtor ::
-  forall c t.
-  (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
-  Object ->
+defineComputMethod ::
+  forall c.
+  (Typeable c, ScriptableComput c) =>
   AttrName ->
-  [AppliedArg] ->
-  [EffectfulArg] ->
-  t ->
+  c ->
   Scope ->
   STM EdhValue
-createComputCtor = createComputCtor' @c True
+defineComputMethod !mthName !comput !outerScope =
+  mkHostProc outerScope EdhMethod mthName (mthProc, argsRcvr)
+  where
+    mthProc :: ArgsPack -> EdhHostProc
+    mthProc !apk !exit =
+      let ?effecting = True
+       in callByScript comput apk $ \ !sr !ets -> case sr of
+            ScriptDone !done -> exitEdh ets exit done
 
--- | Define an Edh method procedure to construct a curried host computation as
--- an Edh object, such an object can be subsequently called, with more
--- arguments to apply, to obtain new objects honoring those arguments, until
--- the list of 'AppliedArg' gets fulfilled, in which case the final effect will
--- be realized.
---
--- The first @effOnCtor@ argument indicates whether effect should be taken on
--- construction (i.e. first call) against the defined Edh method procedure:
--- It won't fire anyway if no enough applied args are supplied by the caller;
--- otherwise, if @effOnCtor@ is `False`, the result object must be called later
--- (with a niladic apk in this case) to realize its effect.
--- Anyway, effectful argument(s) are only resolved upon the effecting call,
--- against that particular call context.
---
--- It's not enforced by the type system, but you must supply the host
--- computation with the type @t@ being a Haskell function, taking exactly
--- @length appliedArgs + length effectfulArgs@ argument(s), and giving a result
--- of type @c@, which having a `HostComput` instance. Failing in any of above,
--- you'll end up with runtime errors.
-createComputCtor' ::
-  forall c t.
-  (HostComput c, Typeable t, Typeable (c -> ComputTBP)) =>
-  Bool ->
-  Object ->
+    argsRcvr :: ArgsReceiver
+    argsRcvr = NullaryReceiver -- TODO infer from scriptableArgs
+
+defineComputClass ::
+  forall c.
+  (Typeable c, ScriptableComput c) =>
   AttrName ->
-  [AppliedArg] ->
-  [EffectfulArg] ->
-  t ->
+  c ->
   Scope ->
-  STM EdhValue
--- todo make `constructor(computObj)` return the host ctor method
-createComputCtor'
-  !effOnCtor
-  !clsComput
-  !ctorName
-  !ctorAppArgs
-  !ctorEffArgs
-  !hostComput
-  !outerScope = do
-    let !comput =
-          Comput
-            ctorName
-            (toDyn $ ComputTBP @c)
-            (Unapplied $ toDyn hostComput)
-            ((,Nothing) <$> ctorAppArgs)
-            ((,Nothing) <$> ctorEffArgs)
-            odEmpty
-    mkHostProc outerScope EdhMethod ctorName $
-      (,NullaryReceiver) $
-        \ !apk !exit !ets -> applyComputArgs comput ets apk $ \ !comput' ->
-          case comput'thunk comput' of
-            Applied !applied ->
-              if effOnCtor
-                then effectComput
-                  ets
-                  (comput'wrapper comput')
-                  applied
-                  (comput'effectful'args comput')
-                  $ \case
-                    Left (!effected, !effArgs, !results) ->
-                      -- one-shot effection on construction
-                      (exitEdh ets exit =<<) $
-                        EdhObject
-                          <$> edhCreateHostObj
-                            clsComput
-                            comput'
-                              { comput'thunk = Effected effected,
-                                comput'effectful'args = effArgs,
-                                comput'results = results
-                              }
-                    Right !result -> exitEdh ets exit result
-                else -- not to take effect on construction
+  STM Object
+defineComputClass = defineComputClass' True
 
-                  (exitEdh ets exit =<<) $
-                    EdhObject <$> edhCreateHostObj clsComput comput'
-            _ ->
-              -- leave it effected, or unapplied
-              (exitEdh ets exit =<<) $
-                EdhObject <$> edhCreateHostObj clsComput comput'
-
-defineComputClass :: Scope -> STM Object
-defineComputClass !clsOuterScope =
-  mkHostClass clsOuterScope "Comput" computAllocator [] $
+defineComputClass' ::
+  forall c.
+  (Typeable c, ScriptableComput c) =>
+  EffectOnCtor ->
+  AttrName ->
+  c ->
+  Scope ->
+  STM Object
+defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
+  mkHostClass clsOuterScope clsName computAllocator [] $
     \ !clsScope -> do
       !mths <-
         sequence $
           [ (AttrByName nm,) <$> mkHostProc clsScope vc nm hp
             | (nm, vc, hp) <-
-                [ ("(@)", EdhMethod, wrapHostProc argReadProc),
-                  ("([])", EdhMethod, wrapHostProc argReadProc),
+                [ ("(@)", EdhMethod, wrapHostProc attrReadProc),
+                  ("([])", EdhMethod, wrapHostProc attrReadProc),
                   ("__repr__", EdhMethod, wrapHostProc reprProc),
                   ("__show__", EdhMethod, wrapHostProc showProc),
                   ("__call__", EdhMethod, wrapHostProc callProc)
@@ -1205,210 +925,286 @@ defineComputClass !clsOuterScope =
       iopdUpdate mths $ edh'scope'entity clsScope
   where
     computAllocator :: ArgsPack -> EdhObjectAllocator
-    computAllocator _apk _ctorExit !etsCtor =
-      throwEdh etsCtor UsageError "Comput not constructable from Edh"
+    computAllocator !apk !ctorExit !etsCtor =
+      runEdhTx etsCtor $
+        let ?effecting = effOnCtor
+         in callByScript rootComput apk $ \ !sr _ets ->
+              ctorExit Nothing $ HostStore $ toDyn sr
 
-    -- Obtain an argument by name
-    argReadProc :: EdhValue -> EdhHostProc
-    argReadProc !keyVal !exit !ets = withThisHostObj ets $
-      \(Comput _ctorName _hcw _thunk !appliedArgs effArgs !results) ->
-        edhValueAsAttrKey ets keyVal $ \ !argKey ->
-          case odLookup argKey results of
-            Just !val -> exitEdh ets exit val
-            Nothing -> do
-              let --
-                  matchAppArg ::
-                    STM () ->
-                    STM ()
-                  matchAppArg !naExit = match appliedArgs
-                    where
-                      match ::
-                        [(AppliedArg, Maybe (EdhValue, Dynamic))] -> STM ()
-                      match [] = naExit
-                      match ((AppliedArg _anno !name _, ad) : rest) =
-                        if name == argKey
-                          then case ad of
-                            Just (av, _d) -> exitEdh ets exit av
-                            Nothing -> exitEdh ets exit edhNothing
-                          else match rest
-
-                  matchEffArg :: STM () -> STM ()
-                  matchEffArg !naExit = match effArgs
-                    where
-                      match ::
-                        [(EffectfulArg, Maybe (EdhValue, Dynamic))] -> STM ()
-                      match [] = naExit
-                      match ((_, Nothing) : rest) = match rest
-                      match ((EffectfulArg _anno !name _, ad) : rest) =
-                        if name == argKey
-                          then case ad of
-                            Just (av, _d) -> exitEdh ets exit av
-                            Nothing -> exitEdh ets exit edhNothing
-                          else match rest
-
-              matchAppArg $ matchEffArg $ exitEdh ets exit edhNA
+    -- Obtain an applied argument or a result field by name
+    attrReadProc :: EdhValue -> EdhHostProc
+    attrReadProc !keyVal !exit !ets = edhValueAsAttrKey ets keyVal $
+      \ !argKey -> withThisHostObj' ets fromDynHostVal $ \case
+        ScriptDone !done -> case argKey of
+          AttrByName "self" -> exitEdh ets exit done
+          _ -> exitEdh ets exit nil
+        ScriptDone' {} -> case argKey of
+          AttrByName "self" ->
+            exitEdh ets exit $
+              EdhObject $ edh'scope'that $ contextScope $ edh'context ets
+          _ -> exitEdh ets exit nil
+        PartiallyApplied _c appliedArgs ->
+          exitEdh ets exit $ appliedArgByKey argKey appliedArgs
+        FullyApplied _c appliedArgs ->
+          exitEdh ets exit $ appliedArgByKey argKey appliedArgs
+        FullyEffected _d !extras appliedArgs -> case odLookup argKey extras of
+          Just !val -> exitEdh ets exit val
+          Nothing -> exitEdh ets exit $ appliedArgByKey argKey appliedArgs
+      where
+        fromDynHostVal = case keyVal of
+          EdhString "self" ->
+            exitEdh ets exit $
+              EdhObject $ edh'scope'that $ contextScope $ edh'context ets
+          _ -> exitEdh ets exit nil
 
     reprProc :: ArgsPack -> EdhHostProc
-    reprProc _ !exit !ets = withThisHostObj ets $
-      \(Comput !ctorName _hcw _thunk !appliedArgs effArgs !results) -> do
-        let withEffsPart :: (Text -> STM ()) -> STM ()
-            withEffsPart !exit' = case effArgs of
-              [] -> exit' ""
-              _ -> seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                exit' $ " {# " <> T.unwords effsRepr <> " #}"
-            withResults :: (Text -> STM ()) -> STM ()
-            withResults !exit' = case odToList results of
-              [] -> exit' ""
-              !kwargs ->
-                seqcontSTM (resultEntry <$> kwargs) $
-                  exit' . ("{# " <>) . (<> " #}\n") . T.unwords
-              where
-                resultEntry (k, v) !exit'' = edhValueRepr ets v $ \ !r ->
-                  exit'' $ attrKeyStr k <> "= " <> r <> ","
-
-        withEffsPart $ \ !effsPart ->
-          withResults $ \ !resultsRepr -> case appliedArgs of
-            [] ->
+    reprProc _ !exit !ets = withThisHostObj' ets fromDynHostVal $
+      \case
+        ScriptDone !done -> edhValueRepr ets done $ \ !doneRepr ->
+          exitEdh ets exit $
+            EdhString $ "{# " <> clsName <> " #} " <> doneRepr
+        ScriptDone' !dd ->
+          exitEdh ets exit $
+            EdhString $ "{# " <> clsName <> ": " <> T.pack (show dd) <> " #} "
+        PartiallyApplied c appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
               exitEdh ets exit $
-                EdhString $ resultsRepr <> ctorName <> "()" <> effsPart
-            _ ->
-              seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
+                EdhString $
+                  clsName <> "( " <> appliedArgsRepr <> ") {# "
+                    <> moreArgsRepr
+                    <> "#}"
+        FullyApplied c appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
+              exitEdh ets exit $
+                EdhString $
+                  clsName <> "( " <> appliedArgsRepr <> ") {# "
+                    <> moreArgsRepr
+                    <> "#}"
+        FullyEffected _d extras appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowExtras (odToList extras) $
+              \ !extrasRepr ->
                 exitEdh ets exit $
                   EdhString $
-                    resultsRepr
-                      <> ctorName
-                      <> "( "
-                      <> T.unwords argReprs
-                      <> " )"
-                      <> effsPart
+                    clsName <> "( " <> appliedArgsRepr <> ") {# "
+                      <> extrasRepr
+                      <> "#}"
       where
-        appliedRepr ::
-          (AppliedArg, Maybe (EdhValue, Dynamic)) ->
-          (Text -> STM ()) ->
-          STM ()
-        appliedRepr (AppliedArg _anno !name _, Nothing) !exit' =
-          exit' $ attrKeyStr name <> ","
-        appliedRepr (AppliedArg _anno !name _, Just (v, _d)) !exit' =
-          edhValueRepr ets v $ \ !vRepr ->
-            exit' $ attrKeyStr name <> "= " <> vRepr <> ","
+        ctx = edh'context ets
+        scope = contextScope ctx
+        this = edh'scope'this scope
 
-        effRepr ::
-          (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-          (Text -> STM ()) ->
-          STM ()
-        effRepr (EffectfulArg _anno !name _, Nothing) !exit' =
-          exit' $ attrKeyStr name <> ","
-        effRepr (EffectfulArg _anno !name _, Just (v, _d)) !exit' =
-          edhValueRepr ets v $ \ !vRepr ->
-            exit' $ attrKeyStr name <> "= " <> vRepr <> ","
+        tshowAppliedArgs ::
+          [(ScriptArgDecl, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowAppliedArgs appliedArgs exit' = go appliedArgs exit'
+          where
+            go :: [(ScriptArgDecl, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((ScriptArgDecl !eff !k _type, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  (if eff then "effect " else "")
+                    <> attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ", "
+                    <> restRepr
+
+        tshowMoreArgs :: [ScriptArgDecl] -> (Text -> STM ()) -> STM ()
+        tshowMoreArgs moreArgs exit' = go moreArgs exit'
+          where
+            go :: [ScriptArgDecl] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go (ScriptArgDecl !eff !k !typeName : rest) exit'' =
+              go rest $ \ !restRepr ->
+                exit'' $
+                  (if eff then "effect " else "")
+                    <> attrKeyStr k
+                    <> " :: "
+                    <> typeName
+                    <> ", "
+                    <> restRepr
+
+        tshowExtras ::
+          [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowExtras es exit' = go es exit'
+          where
+            go :: [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((!k, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ", "
+                    <> restRepr
+
+        fromDynHostVal = case edh'obj'store this of
+          HostStore !dd ->
+            exitEdh ets exit $
+              EdhString $
+                "{# " <> clsName <> ": <raw>" <> T.pack (show dd) <> " #} "
+          _ -> throwEdh ets EvalError "bug: Comput not a host object"
 
     showProc :: ArgsPack -> EdhHostProc
-    showProc _ !exit !ets = withThisHostObj ets $
-      \(Comput !ctorName _hcw !thunk !appliedArgs effArgs !results) -> do
-        let withResults :: (Text -> STM ()) -> STM ()
-            withResults !exit' = case odToList results of
-              [] -> exit' ""
-              !kwargs ->
-                seqcontSTM (resultEntry <$> kwargs) $
-                  exit' . ("{# Results\n" <>) . (<> " #}\n") . T.unlines
-              where
-                resultEntry (k, v) !exit'' = edhValueRepr ets v $ \ !r ->
-                  exit'' $ "  " <> attrKeyStr k <> "= " <> r <> ","
-
-        withResults $ \ !resultsLines ->
-          seqcontSTM (appliedRepr <$> appliedArgs) $ \ !argReprs ->
-            case thunk of
-              Unapplied !unapplied ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      resultsLines <> ctorName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Unapplied "
-                        <> T.pack (show unapplied)
-                        <> "\n"
-                        <> T.unlines effsRepr
-                        <> "#}"
-              Applied !applied ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      resultsLines <> ctorName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Applied "
-                        <> T.pack (show applied)
-                        <> "\n"
-                        <> T.unlines effsRepr
-                        <> "#}"
-              Effected !effected ->
-                seqcontSTM (effRepr <$> effArgs) $ \ !effsRepr ->
-                  exitEdh ets exit $
-                    EdhString $
-                      resultsLines <> ctorName <> "(\n" <> T.unlines argReprs
-                        <> ") {# Effected "
-                        <> T.pack (show effected)
-                        <> "\n"
-                        <> T.unlines effsRepr
-                        <> "#}"
+    showProc _ !exit !ets = withThisHostObj' ets fromDynHostVal $
+      \case
+        ScriptDone !done -> edhValueRepr ets done $ \ !doneRepr ->
+          exitEdh ets exit $
+            EdhString $ clsName <> ": <done> " <> doneRepr
+        ScriptDone' !dd ->
+          exitEdh ets exit $
+            EdhString $ clsName <> ": <host> " <> T.pack (show dd)
+        PartiallyApplied c appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
+              exitEdh ets exit $
+                EdhString $
+                  clsName <> "(\n" <> appliedArgsRepr <> "\n) {#\n"
+                    <> moreArgsRepr
+                    <> "\n#}"
+        FullyApplied c appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
+              exitEdh ets exit $
+                EdhString $
+                  clsName <> "(\n" <> appliedArgsRepr <> "\n) {#\n"
+                    <> moreArgsRepr
+                    <> "\n#}"
+        FullyEffected _d extras appliedArgs ->
+          tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
+            tshowExtras (odToList extras) $
+              \ !extrasRepr ->
+                exitEdh ets exit $
+                  EdhString $
+                    clsName <> "(\n" <> appliedArgsRepr <> "\n) {#\n"
+                      <> extrasRepr
+                      <> "\n#}"
       where
-        appliedRepr ::
-          (AppliedArg, Maybe (EdhValue, Dynamic)) ->
-          (Text -> STM ()) ->
-          STM ()
-        appliedRepr (AppliedArg !anno !name _, Nothing) !exit' =
-          exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
-        appliedRepr (AppliedArg !anno !name _, Just (v, _d)) !exit' =
-          edhValueRepr ets v $ \ !vRepr ->
-            exit' $
-              "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
-                <> ","
+        ctx = edh'context ets
+        scope = contextScope ctx
+        this = edh'scope'this scope
 
-        effRepr ::
-          (EffectfulArg, Maybe (EdhValue, Dynamic)) ->
-          (Text -> STM ()) ->
-          STM ()
-        effRepr (EffectfulArg !anno !name _, Nothing) !exit' =
-          exit' $ "  " <> attrKeyStr name <> " :: " <> anno <> ","
-        effRepr (EffectfulArg !anno !name _, Just (v, _d)) !exit' =
-          edhValueRepr ets v $ \ !vRepr ->
-            exit' $
-              "  " <> attrKeyStr name <> "= " <> vRepr <> " :: " <> anno
-                <> ","
+        tshowAppliedArgs ::
+          [(ScriptArgDecl, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowAppliedArgs appliedArgs exit' = go appliedArgs exit'
+          where
+            go :: [(ScriptArgDecl, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((ScriptArgDecl !eff !k _type, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  (if eff then "  effect " else "  ")
+                    <> attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ",\n"
+                    <> restRepr
+
+        tshowMoreArgs :: [ScriptArgDecl] -> (Text -> STM ()) -> STM ()
+        tshowMoreArgs moreArgs exit' = go moreArgs exit'
+          where
+            go :: [ScriptArgDecl] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go (ScriptArgDecl !eff !k !typeName : rest) exit'' =
+              go rest $ \ !restRepr ->
+                exit'' $
+                  (if eff then "  effect " else "  ")
+                    <> attrKeyStr k
+                    <> " :: "
+                    <> typeName
+                    <> ",\n"
+                    <> restRepr
+
+        tshowExtras ::
+          [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowExtras es exit' = go es exit'
+          where
+            go :: [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((!k, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  "  "
+                    <> attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ",\n"
+                    <> restRepr
+
+        fromDynHostVal = case edh'obj'store this of
+          HostStore !dd ->
+            exitEdh ets exit $
+              EdhString $ clsName <> ": <raw> " <> T.pack (show dd)
+          _ -> throwEdh ets EvalError "bug: Comput not a host object"
 
     callProc :: ArgsPack -> EdhHostProc
-    callProc !apk !exit !ets = withThisHostObj ets $
-      \ !comput -> applyComputArgs comput ets apk $ \ !comput' ->
-        case comput'thunk comput' of
-          Applied !applied ->
-            effectComput
-              ets
-              (comput'wrapper comput')
-              applied
-              (comput'effectful'args comput')
-              $ \case
-                Left (!effected, !effArgs, !results) -> do
-                  !newOid <- unsafeIOToSTM newUnique
-                  exitEdh ets exit $
-                    EdhObject
-                      this
-                        { edh'obj'ident = newOid,
-                          edh'obj'store =
-                            HostStore $
-                              toDyn
-                                comput'
-                                  { comput'thunk = Effected effected,
-                                    comput'effectful'args = effArgs,
-                                    comput'results = results
-                                  }
-                        }
-                Right !result -> exitEdh ets exit result
-          _ -> do
-            !newOid <- unsafeIOToSTM newUnique
-            exitEdh ets exit $
-              EdhObject
-                this
-                  { edh'obj'ident = newOid,
-                    edh'obj'store = HostStore $ toDyn comput'
-                  }
+    callProc apk@(ArgsPack args kwargs) !exit !ets =
+      withThisHostObj' ets fromDynHostVal $ \case
+        ScriptDone !done ->
+          if null args && odNull kwargs
+            then exitEdh ets exit done
+            else throwEdh ets UsageError "extranous arguments"
+        ScriptDone' {} ->
+          if null args && odNull kwargs
+            then exitEdh ets exit $ EdhObject that
+            else throwEdh ets UsageError "extranous arguments"
+        PartiallyApplied c appliedArgs ->
+          runEdhTx ets $
+            let ?effecting = True
+             in callByScript c apk $ exitWith appliedArgs
+        FullyApplied c appliedArgs ->
+          runEdhTx ets $
+            let ?effecting = True
+             in callByScript c apk $ exitWith appliedArgs
+        FullyEffected {} ->
+          if null args && odNull kwargs
+            then exitEdh ets exit $ EdhObject that
+            else throwEdh ets UsageError "extranous arguments"
       where
-        !ctx = edh'context ets
-        !scope = contextScope ctx
-        !this = edh'scope'this scope
+        ctx = edh'context ets
+        scope = contextScope ctx
+        this = edh'scope'this scope
+        that = edh'scope'that scope
+
+        fromDynHostVal =
+          throwEdh ets UsageError "done computation not callable anymore"
+
+        exitWith :: [(ScriptArgDecl, EdhValue)] -> ScriptedResult -> EdhTx
+        exitWith appliedArgs sr _ets = case sr of
+          ScriptDone !done -> exitEdh ets exit done
+          ScriptDone' !dd -> exitDerived dd
+          PartiallyApplied c' appliedArgs' ->
+            exitDerived $
+              toDyn $ PartiallyApplied c' $! appliedArgs ++ appliedArgs'
+          FullyApplied c' appliedArgs' ->
+            exitDerived $
+              toDyn $ FullyApplied c' $! appliedArgs ++ appliedArgs'
+          FullyEffected !d !extras appliedArgs' ->
+            exitDerived $
+              toDyn $ FullyEffected d extras $! appliedArgs ++ appliedArgs'
+          where
+            exitDerived :: Dynamic -> STM ()
+            exitDerived dd = do
+              !newOid <- unsafeIOToSTM newUnique
+              exitEdh ets exit $
+                EdhObject
+                  this
+                    { edh'obj'ident = newOid,
+                      edh'obj'store = HostStore dd
+                    }
+
+-- | Obtain the 'Dynamic' value of a host object, it can be an effected comput
+-- or a raw host value
+effectedComput :: Object -> Maybe Dynamic
+effectedComput !obj = case edh'obj'store obj of
+  HostStore !dhs -> case fromDynamic dhs of
+    Just (sr :: ScriptedResult) -> case sr of
+      FullyEffected !d _extras _appliedArgs -> Just d
+      ScriptDone' !d -> Just d
+      _ -> Nothing
+    _ -> Just dhs
+  _ -> Nothing
