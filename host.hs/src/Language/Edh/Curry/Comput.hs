@@ -968,12 +968,15 @@ defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
             EdhString $ "{# " <> clsName <> ": " <> T.pack (show dd) <> " #} "
         PartiallyApplied c appliedArgs ->
           tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
-            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
-              exitEdh ets exit $
-                EdhString $
-                  clsName <> "( " <> appliedArgsRepr <> ") {# "
-                    <> moreArgsRepr
-                    <> "#}"
+            tshowArgsAhead (odToList $ argsScriptedAhead c) $
+              \ !argsAheadRepr -> tshowMoreArgs (scriptableArgs c) $
+                \ !moreArgsRepr ->
+                  exitEdh ets exit $
+                    EdhString $
+                      clsName <> "( " <> appliedArgsRepr <> argsAheadRepr
+                        <> ") {# "
+                        <> moreArgsRepr
+                        <> "#}"
         FullyApplied c appliedArgs ->
           tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
             tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
@@ -1007,6 +1010,21 @@ defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
                 exit'' $
                   (if eff then "effect " else "")
                     <> attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ", "
+                    <> restRepr
+
+        tshowArgsAhead ::
+          [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowArgsAhead argsAhead exit' = go argsAhead exit'
+          where
+            go :: [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((!k, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  attrKeyStr k
                     <> "= "
                     <> repr
                     <> ", "
@@ -1060,12 +1078,15 @@ defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
             EdhString $ clsName <> ": <host> " <> T.pack (show dd)
         PartiallyApplied c appliedArgs ->
           tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
-            tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
-              exitEdh ets exit $
-                EdhString $
-                  clsName <> "(\n" <> appliedArgsRepr <> "\n) {#\n"
-                    <> moreArgsRepr
-                    <> "\n#}"
+            tshowArgsAhead (odToList $ argsScriptedAhead c) $
+              \ !argsAheadRepr -> tshowMoreArgs (scriptableArgs c) $
+                \ !moreArgsRepr ->
+                  exitEdh ets exit $
+                    EdhString $
+                      clsName <> "(\n" <> appliedArgsRepr <> argsAheadRepr
+                        <> "\n) {#\n"
+                        <> moreArgsRepr
+                        <> "\n#}"
         FullyApplied c appliedArgs ->
           tshowAppliedArgs appliedArgs $ \ !appliedArgsRepr ->
             tshowMoreArgs (scriptableArgs c) $ \ !moreArgsRepr ->
@@ -1098,6 +1119,22 @@ defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
               go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
                 exit'' $
                   (if eff then "  effect " else "  ")
+                    <> attrKeyStr k
+                    <> "= "
+                    <> repr
+                    <> ",\n"
+                    <> restRepr
+
+        tshowArgsAhead ::
+          [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+        tshowArgsAhead argsAhead exit' = go argsAhead exit'
+          where
+            go :: [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+            go [] exit'' = exit'' ""
+            go ((!k, !v) : rest) exit'' =
+              go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+                exit'' $
+                  "  "
                     <> attrKeyStr k
                     <> "= "
                     <> repr
