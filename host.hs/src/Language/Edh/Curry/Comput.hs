@@ -782,7 +782,7 @@ instance Typeable t => ScriptArgAdapter (HostValue t) where
 
   adaptedArgValue (HostValue _val !obj) = EdhObject obj
 
-data HostSeq t = ScriptArgAdapter t => HostSeq ![t] ![Object]
+data HostSeq t = ScriptArgAdapter t => HostSeq ![t] ![EdhValue]
 
 instance (Typeable t, ScriptArgAdapter t) => ScriptArgAdapter (HostSeq t) where
   adaptedArgType = T.pack $ "[" <> show (typeRep @t) <> "]"
@@ -801,13 +801,13 @@ instance (Typeable t, ScriptArgAdapter t) => ScriptArgAdapter (HostSeq t) where
       exitWith [] = exitEdhTx exit $ HostSeq [] []
       exitWith !vs = go vs []
         where
-          go :: [EdhValue] -> [(t, Object)] -> EdhTx
+          go :: [EdhValue] -> [(t, EdhValue)] -> EdhTx
           go [] rs = exitEdhTx exit $ uncurry HostSeq $ unzip $ reverse rs
           go (ev : rest) rs = adaptEdhArg ev $
-            \(HostValue !t !o) -> go rest ((t, o) : rs)
+            \ !t -> go rest ((t, adaptedArgValue t) : rs)
 
-  adaptedArgValue (HostSeq _vals !objs) =
-    EdhArgsPack $ ArgsPack (EdhObject <$> objs) odEmpty
+  adaptedArgValue (HostSeq _vals !edhVals) =
+    EdhArgsPack $ ArgsPack edhVals odEmpty
 
 -- * Utilities
 
