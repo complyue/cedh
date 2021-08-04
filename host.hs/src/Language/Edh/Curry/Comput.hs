@@ -255,6 +255,7 @@ applyMaybeEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
             (ArgsPack [] odEmpty)
             $ \case
               ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
               FullyEffected d extras !appliedArgs ->
                 exitEdhTx exit $ FullyEffected d extras appliedArgs
               _ -> error "bug: not fully effected"
@@ -264,6 +265,7 @@ applyMaybeEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
             (ArgsPack [] odEmpty)
             $ \case
               ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
               FullyEffected d extras !appliedArgs ->
                 exitEdhTx exit $
                   FullyEffected d extras $
@@ -338,6 +340,7 @@ applyEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
             (ArgsPack [] odEmpty)
             $ \case
               ScriptDone !done -> exitEdhTx exit $ ScriptDone done
+              ScriptDone' !done -> exitEdhTx exit $ ScriptDone' done
               FullyEffected d extras !appliedArgs ->
                 exitEdhTx exit $
                   FullyEffected d extras $
@@ -349,7 +352,8 @@ applyEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
 
 -- * Computation result as base cases
 
--- | Wrap a pure computation result as scripted
+-- | Wrap a pure computation result as scripted, without recording of all args
+-- ever applied
 data ComputDone a = (Typeable a) => ComputDone !a
 
 instance ScriptableComput (ComputDone a) where
@@ -358,6 +362,27 @@ instance ScriptableComput (ComputDone a) where
     if not (null args) || not (odNull kwargs)
       then throwEdhTx UsageError "extranous arguments"
       else exitEdhTx exit $ ScriptDone' (toDyn a)
+
+-- | Wrap a pure computation result as scripted, without recording of all args
+-- ever applied
+newtype ComputDone_ = ComputDone_ EdhValue
+
+instance ScriptableComput ComputDone_ where
+  scriptableArgs _ = []
+  callByScript (ComputDone_ v) (ArgsPack !args !kwargs) !exit =
+    if not (null args) || not (odNull kwargs)
+      then throwEdhTx UsageError "extranous arguments"
+      else exitEdhTx exit $ ScriptDone v
+
+-- | Wrap a pure computation result as scripted
+data ComputPure a = (Typeable a) => ComputPure !a
+
+instance ScriptableComput (ComputPure a) where
+  scriptableArgs _ = []
+  callByScript (ComputPure a) (ArgsPack !args !kwargs) !exit =
+    if not (null args) || not (odNull kwargs)
+      then throwEdhTx UsageError "extranous arguments"
+      else exitEdhTx exit $ FullyEffected (toDyn a) odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
 data ComputEdh a
@@ -370,7 +395,7 @@ instance ScriptableComput (ComputEdh a) where
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else act ets $ \ !a ->
-        exitEdh ets exit $ ScriptDone' (toDyn a)
+        exitEdh ets exit $ FullyEffected (toDyn a) odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
 --
@@ -386,18 +411,18 @@ instance ScriptableComput (ComputEdh' a) where
   callByScript (ComputEdh' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d -> exitEdh ets exit $ ScriptDone' d
+      else act ets $ \ !d -> exitEdh ets exit $ FullyEffected d odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
 --
 -- Use this form in case you can give out an 'EdhValue' directly
-newtype ComputEdh''
-  = ComputEdh'' (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
+newtype ComputEdh_
+  = ComputEdh_ (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
 
-instance ScriptableComput ComputEdh'' where
+instance ScriptableComput ComputEdh_ where
   scriptableArgs _ = []
 
-  callByScript (ComputEdh'' !act) (ArgsPack !args !kwargs) !exit !ets =
+  callByScript (ComputEdh_ !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else act ets $ \ !v -> exitEdh ets exit $ ScriptDone v
@@ -447,7 +472,7 @@ instance ScriptableComput (ComputIO a) where
       else runEdhTx ets $
         edhContIO $ do
           !d <- act
-          atomically $ exitEdh ets exit $ ScriptDone' (toDyn d)
+          atomically $ exitEdh ets exit $ FullyEffected (toDyn d) odEmpty []
 
 -- | Wrap a general effectful computation in the 'IO' monad
 --
@@ -465,17 +490,17 @@ instance ScriptableComput (ComputIO' a) where
       else runEdhTx ets $
         edhContIO $ do
           !d <- act
-          atomically $ exitEdh ets exit $ ScriptDone' d
+          atomically $ exitEdh ets exit $ FullyEffected d odEmpty []
 
 -- | Wrap a general effectful computation in the 'IO' monad
 --
 -- Use this form in case you can give out an 'EdhValue' directly
-newtype ComputIO'' = ComputIO'' (IO EdhValue)
+newtype ComputIO_ = ComputIO_ (IO EdhValue)
 
-instance ScriptableComput ComputIO'' where
+instance ScriptableComput ComputIO_ where
   scriptableArgs _ = []
 
-  callByScript (ComputIO'' !act) (ArgsPack !args !kwargs) !exit !ets =
+  callByScript (ComputIO_ !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
       else runEdhTx ets $
@@ -495,7 +520,7 @@ instance ScriptableComput (ComputSTM a) where
       else runEdhTx ets $
         edhContSTM $ do
           !d <- act
-          exitEdh ets exit $ ScriptDone' (toDyn d)
+          exitEdh ets exit $ FullyEffected (toDyn d) odEmpty []
 
 -- | Wrap a general effectful computation in the 'STM' monad
 --
@@ -513,23 +538,20 @@ instance ScriptableComput (ComputSTM' a) where
       else runEdhTx ets $
         edhContSTM $ do
           !d <- act
-          exitEdh ets exit $ ScriptDone' d
+          exitEdh ets exit $ FullyEffected d odEmpty []
 
 -- | Wrap a general effectful computation in the 'STM' monad
 --
 -- Use this form in case you can give out an 'EdhValue' directly
-newtype ComputSTM'' = ComputSTM'' (STM EdhValue)
+newtype ComputSTM_ = ComputSTM_ (STM EdhValue)
 
-instance ScriptableComput ComputSTM'' where
+instance ScriptableComput ComputSTM_ where
   scriptableArgs _ = []
 
-  callByScript (ComputSTM'' !act) (ArgsPack !args !kwargs) !exit !ets =
+  callByScript (ComputSTM_ !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else runEdhTx ets $
-        edhContSTM $ do
-          !v <- act
-          exitEdh ets exit $ ScriptDone v
+      else runEdhTx ets $ edhContSTM $ act >>= exitEdh ets exit . ScriptDone
 
 -- * Script Argument Adapters
 
@@ -903,11 +925,11 @@ appliedArgByKey k = go
 defineComputMethod ::
   forall c.
   (Typeable c, ScriptableComput c) =>
-  AttrName ->
   c ->
+  AttrName ->
   Scope ->
   STM EdhValue
-defineComputMethod !mthName !comput !outerScope =
+defineComputMethod !comput !mthName !outerScope =
   mkHostProc outerScope EdhMethod mthName (mthProc, argsRcvr)
   where
     mthProc :: ArgsPack -> EdhHostProc
@@ -922,15 +944,15 @@ defineComputMethod !mthName !comput !outerScope =
                 tshowArgsAhead ets (odToList $ argsScriptedAhead c) $
                   \ !argsAheadRepr ->
                     defineComputMethod
-                      (mthName <> "( " <> argsRepr <> argsAheadRepr <> ")")
                       c
+                      (mthName <> "( " <> argsRepr <> argsAheadRepr <> ")")
                       outerScope
                       >>= exitEdh ets exit
             FullyApplied c appliedArgs -> tshowAppliedArgs ets appliedArgs $
               \ !argsRepr ->
                 defineComputMethod
-                  (mthName <> "( " <> argsRepr <> ")")
                   c
+                  (mthName <> "( " <> argsRepr <> ")")
                   outerScope
                   >>= exitEdh ets exit
             FullyEffected !d _extras _appliedArgs ->
@@ -980,8 +1002,8 @@ defineComputMethod !mthName !comput !outerScope =
 defineComputClass ::
   forall c.
   (Typeable c, ScriptableComput c) =>
-  AttrName ->
   c ->
+  AttrName ->
   Scope ->
   STM Object
 defineComputClass = defineComputClass' True
@@ -990,11 +1012,11 @@ defineComputClass' ::
   forall c.
   (Typeable c, ScriptableComput c) =>
   EffectOnCtor ->
-  AttrName ->
   c ->
+  AttrName ->
   Scope ->
   STM Object
-defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
+defineComputClass' !effOnCtor !rootComput !clsName !clsOuterScope =
   mkHostClass clsOuterScope clsName computAllocator [] $
     \ !clsScope -> do
       !mths <-
@@ -1299,7 +1321,8 @@ defineComputClass' !effOnCtor !clsName !rootComput !clsOuterScope =
         exitWith :: [(ScriptArgDecl, EdhValue)] -> ScriptedResult -> EdhTx
         exitWith appliedArgs sr _ets = case sr of
           ScriptDone !done -> exitEdh ets exit done
-          ScriptDone' !dd -> exitDerived dd
+          ScriptDone' !dd ->
+            edhWrapHostValue' ets dd >>= exitEdh ets exit . EdhObject
           PartiallyApplied c' appliedArgs' ->
             exitDerived $
               toDyn $ PartiallyApplied c' $! appliedArgs ++ appliedArgs'
@@ -1331,3 +1354,36 @@ effectedComput !obj = case edh'obj'store obj of
       _ -> Nothing
     _ -> Just dhs
   _ -> Nothing
+
+-- | Apply a mapper over the effected host value, a new object (with new
+-- identity) will be produced, inheriting all aspects of the original object
+mapEffectedComput ::
+  forall a b.
+  (Typeable a, Typeable b) =>
+  (a -> b) ->
+  Object ->
+  STM () ->
+  (Object -> STM ()) ->
+  STM ()
+mapEffectedComput f o naExit exit = case edh'obj'store o of
+  HostStore !dhs -> case fromDynamic dhs of
+    Just (sr :: ScriptedResult) -> case sr of
+      FullyEffected !d !extras !appliedArgs -> tryDynData d $ \ !d' ->
+        toDyn $ FullyEffected d' extras appliedArgs
+      ScriptDone' !d ->
+        -- todo should use id here?
+        tryDynData d $ toDyn . ScriptDone'
+      _ -> naExit
+    _ -> tryDynData dhs id
+  _ -> naExit
+  where
+    tryDynData :: Dynamic -> (Dynamic -> Dynamic) -> STM ()
+    tryDynData dd wd = case fromDynamic dd of
+      Nothing -> naExit
+      Just (a :: a) -> do
+        !newOid <- unsafeIOToSTM newUnique
+        exit
+          o
+            { edh'obj'ident = newOid,
+              edh'obj'store = HostStore $ wd $ toDyn $ f a
+            }
