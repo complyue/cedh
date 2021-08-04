@@ -51,7 +51,7 @@ data ScriptedResult
     ScriptDone' !Dynamic
   | -- | Partially applied host computation, with all args ever applied
     forall c.
-    ScriptableComput c =>
+    (ScriptableComput c, Typeable c) =>
     PartiallyApplied !c ![(ScriptArgDecl, EdhValue)]
   | -- | Fully applied host computation, with all args ever applied
     --
@@ -59,7 +59,7 @@ data ScriptedResult
     -- to take effect. By "taking effect", it'll really resolve effectful
     -- arguments from that call site.
     forall c.
-    ScriptableComput c =>
+    (ScriptableComput c, Typeable c) =>
     FullyApplied !c ![(ScriptArgDecl, EdhValue)]
   | -- | The computation is finally done, with the result as a host value plus
     -- extra named result values, and with all args ever applied
@@ -77,14 +77,18 @@ class Typeable a => ScriptArgAdapter a where
 --
 -- this enables currying, by representing partially applied computation as
 -- 1st class value
-data PendingApplied name a v c
+data PendingApplied name a c
   = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
     PendingApplied !KwArgs !(ScriptArg a name -> c)
 
 -- | apply one more arg to a previously saved, partially applied computation
 instance
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
-  ScriptableComput (PendingApplied name a v c)
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingApplied name a c)
+  ) =>
+  ScriptableComput (PendingApplied name a c)
   where
   argsScriptedAhead (PendingApplied !pargs _f) = pargs
 
@@ -138,7 +142,11 @@ instance
 -- | apply one more arg to a scriptable computation
 instance
   {-# OVERLAPPABLE #-}
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingApplied name a c)
+  ) =>
   ScriptableComput (ScriptArg a name -> c)
   where
   scriptableArgs f =
@@ -184,13 +192,21 @@ instance
 
 -- | Scriptable Computation that waiting to take effect
 data PendingMaybeEffected name a c
-  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  = ( KnownSymbol name,
+      ScriptArgAdapter a,
+      ScriptableComput c,
+      Typeable (PendingMaybeEffected name a c)
+    ) =>
     PendingMaybeEffected !(ScriptArg (Effective (Maybe a)) name -> c)
 
 -- | resolve then apply one more effectful arg to previously saved, now
 -- effecting computation
 instance
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingMaybeEffected name a c)
+  ) =>
   ScriptableComput (PendingMaybeEffected name a c)
   where
   scriptableArgs (PendingMaybeEffected !f) = scriptableArgs f
@@ -203,7 +219,11 @@ instance
 
 -- | resolve then apply one more effectful arg to the effecting computation
 instance
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingMaybeEffected name a c)
+  ) =>
   ScriptableComput (ScriptArg (Effective (Maybe a)) name -> c)
   where
   scriptableArgs f =
@@ -261,7 +281,11 @@ data PendingEffected name a c
 -- | resolve then apply one more effectful arg to previously saved, now
 -- effecting computation
 instance
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingEffected name a c)
+  ) =>
   ScriptableComput (PendingEffected name a c)
   where
   scriptableArgs (PendingEffected !f) = scriptableArgs f
@@ -275,7 +299,11 @@ instance
 -- | resolve then apply one more effectful arg to the effecting computation
 instance
   {-# OVERLAPPABLE #-}
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  ( KnownSymbol name,
+    ScriptArgAdapter a,
+    ScriptableComput c,
+    Typeable (PendingEffected name a c)
+  ) =>
   ScriptableComput (ScriptArg (Effective a) name -> c)
   where
   scriptableArgs f =
@@ -887,9 +915,67 @@ defineComputMethod !mthName !comput !outerScope =
       let ?effecting = True
        in callByScript comput apk $ \ !sr !ets -> case sr of
             ScriptDone !done -> exitEdh ets exit done
+            ScriptDone' !done ->
+              edhWrapHostValue' ets done >>= exitEdh ets exit . EdhObject
+            PartiallyApplied c appliedArgs ->
+              tshowAppliedArgs ets appliedArgs $ \ !argsRepr ->
+                tshowArgsAhead ets (odToList $ argsScriptedAhead c) $
+                  \ !argsAheadRepr ->
+                    defineComputMethod
+                      (mthName <> "( " <> argsRepr <> argsAheadRepr <> ")")
+                      c
+                      outerScope
+                      >>= exitEdh ets exit
+            FullyApplied c appliedArgs -> tshowAppliedArgs ets appliedArgs $
+              \ !argsRepr ->
+                defineComputMethod
+                  (mthName <> "( " <> argsRepr <> ")")
+                  c
+                  outerScope
+                  >>= exitEdh ets exit
+            FullyEffected !d _extras _appliedArgs ->
+              edhWrapHostValue' ets d >>= exitEdh ets exit . EdhObject
 
     argsRcvr :: ArgsReceiver
     argsRcvr = NullaryReceiver -- TODO infer from scriptableArgs
+
+    --
+    tshowAppliedArgs ::
+      EdhThreadState ->
+      [(ScriptArgDecl, EdhValue)] ->
+      (Text -> STM ()) ->
+      STM ()
+    tshowAppliedArgs !ets appliedArgs exit' = go appliedArgs exit'
+      where
+        go :: [(ScriptArgDecl, EdhValue)] -> (Text -> STM ()) -> STM ()
+        go [] exit'' = exit'' ""
+        go ((ScriptArgDecl !eff !k _type, !v) : rest) exit'' =
+          go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+            exit'' $
+              (if eff then "effect " else "")
+                <> attrKeyStr k
+                <> "= "
+                <> repr
+                <> ", "
+                <> restRepr
+
+    tshowArgsAhead ::
+      EdhThreadState ->
+      [(AttrKey, EdhValue)] ->
+      (Text -> STM ()) ->
+      STM ()
+    tshowArgsAhead !ets argsAhead exit' = go argsAhead exit'
+      where
+        go :: [(AttrKey, EdhValue)] -> (Text -> STM ()) -> STM ()
+        go [] exit'' = exit'' ""
+        go ((!k, !v) : rest) exit'' =
+          go rest $ \ !restRepr -> edhValueRepr ets v $ \ !repr ->
+            exit'' $
+              attrKeyStr k
+                <> "= "
+                <> repr
+                <> ", "
+                <> restRepr
 
 defineComputClass ::
   forall c.
