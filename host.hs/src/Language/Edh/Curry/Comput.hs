@@ -13,7 +13,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique
 import GHC.Conc (unsafeIOToSTM)
-import GHC.TypeLits
+import qualified GHC.TypeLits as TypeLits
 import Language.Edh.Curry.Args
 import Language.Edh.EHI
 import Type.Reflection (typeRep)
@@ -78,12 +78,12 @@ class Typeable a => ScriptArgAdapter a where
 -- this enables currying, by representing partially applied computation as
 -- 1st class value
 data PendingApplied name a c
-  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  = (TypeLits.KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
     PendingApplied !KwArgs !(ScriptArg a name -> c)
 
 -- | apply one more arg to a previously saved, partially applied computation
 instance
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingApplied name a c)
@@ -136,13 +136,13 @@ instance
         [] ->
           exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) []
     where
-      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
       argDecl = ScriptArgDecl False argName (adaptedArgType @a)
 
 -- | apply one more arg to a scriptable computation
 instance
   {-# OVERLAPPABLE #-}
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingApplied name a c)
@@ -153,7 +153,7 @@ instance
     ScriptArgDecl False argName (adaptedArgType @a) :
     scriptableArgs (f undefined)
     where
-      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
 
   callByScript f (ArgsPack !args !kwargs) !exit =
     case odTakeOut argName kwargs of
@@ -187,12 +187,12 @@ instance
         [] ->
           exitEdhTx exit $ PartiallyApplied (PendingApplied kwargs' f) []
     where
-      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
       argDecl = ScriptArgDecl False argName (adaptedArgType @a)
 
 -- | Scriptable Computation that waiting to take effect
 data PendingMaybeEffected name a c
-  = ( KnownSymbol name,
+  = ( TypeLits.KnownSymbol name,
       ScriptArgAdapter a,
       ScriptableComput c,
       Typeable (PendingMaybeEffected name a c)
@@ -202,7 +202,7 @@ data PendingMaybeEffected name a c
 -- | resolve then apply one more effectful arg to previously saved, now
 -- effecting computation
 instance
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingMaybeEffected name a c)
@@ -219,7 +219,7 @@ instance
 
 -- | resolve then apply one more effectful arg to the effecting computation
 instance
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingMaybeEffected name a c)
@@ -230,7 +230,7 @@ instance
     ScriptArgDecl True argName (T.pack (show $ typeRep @(Maybe a))) :
     scriptableArgs (f undefined)
     where
-      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
 
   callByScript !f (ArgsPack !args !kwargs) !exit
     | not $ null args = throwEdhTx UsageError "extranous args"
@@ -242,7 +242,7 @@ instance
 -- | resolve then apply one more effectful arg to the effecting computation
 applyMaybeEffectfulArg ::
   forall name a c.
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  (TypeLits.KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   (ScriptArg (Effective (Maybe a)) name -> c) ->
   EdhTxExit ScriptedResult ->
   EdhTx
@@ -272,18 +272,18 @@ applyMaybeEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
                     (argDecl, adaptedArgValue ad) : appliedArgs
               _ -> error "bug: not fully effected"
   where
-    argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+    argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
     argDecl = ScriptArgDecl True argName (T.pack $ show $ typeRep @(Maybe a))
 
 -- | Scriptable Computation that waiting to take effect
 data PendingEffected name a c
-  = (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  = (TypeLits.KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
     PendingEffected !(ScriptArg (Effective a) name -> c)
 
 -- | resolve then apply one more effectful arg to previously saved, now
 -- effecting computation
 instance
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingEffected name a c)
@@ -301,7 +301,7 @@ instance
 -- | resolve then apply one more effectful arg to the effecting computation
 instance
   {-# OVERLAPPABLE #-}
-  ( KnownSymbol name,
+  ( TypeLits.KnownSymbol name,
     ScriptArgAdapter a,
     ScriptableComput c,
     Typeable (PendingEffected name a c)
@@ -312,7 +312,7 @@ instance
     ScriptArgDecl True argName (T.pack $ show $ typeRep @a) :
     scriptableArgs (f undefined)
     where
-      argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+      argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
 
   callByScript !f (ArgsPack !args !kwargs) !exit
     | not $ null args = throwEdhTx UsageError "extranous args"
@@ -324,7 +324,7 @@ instance
 -- | resolve then apply one more effectful arg to the effecting computation
 applyEffectfulArg ::
   forall name a c.
-  (KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
+  (TypeLits.KnownSymbol name, ScriptArgAdapter a, ScriptableComput c) =>
   (ScriptArg (Effective a) name -> c) ->
   EdhTxExit ScriptedResult ->
   EdhTx
@@ -347,7 +347,7 @@ applyEffectfulArg !f !exit = performEdhEffect' argName $ \ !maybeVal ->
                     (argDecl, adaptedArgValue ad) : appliedArgs
               _ -> error "bug: not fully effected"
   where
-    argName = AttrByName $ T.pack $ symbolVal (Proxy :: Proxy name)
+    argName = AttrByName $ T.pack $ TypeLits.symbolVal (Proxy :: Proxy name)
     argDecl = ScriptArgDecl True argName (T.pack $ show $ typeRep @a)
 
 -- * Computation result as base cases
@@ -385,8 +385,7 @@ instance ScriptableComput (ComputPure a) where
       else exitEdhTx exit $ FullyEffected (toDyn a) odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
-data ComputEdh a
-  = Typeable a => ComputEdh (EdhThreadState -> (a -> STM ()) -> STM ())
+data ComputEdh a = Typeable a => ComputEdh (EdhTxExit a -> EdhTx)
 
 instance ScriptableComput (ComputEdh a) where
   scriptableArgs _ = []
@@ -394,16 +393,16 @@ instance ScriptableComput (ComputEdh a) where
   callByScript (ComputEdh !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !a ->
-        exitEdh ets exit $ FullyEffected (toDyn a) odEmpty []
+      else runEdhTx ets $
+        act $ \ !a ->
+          exitEdhTx exit $ FullyEffected (toDyn a) odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
 --
 -- Use this form in case you construct a 'Dynamic' result yourself
 --
 -- Note the type @a@ is for information purpose only, no way get asserted
-newtype ComputEdh' a
-  = ComputEdh' (EdhThreadState -> (Dynamic -> STM ()) -> STM ())
+newtype ComputEdh' a = ComputEdh' (EdhTxExit Dynamic -> EdhTx)
 
 instance ScriptableComput (ComputEdh' a) where
   scriptableArgs _ = []
@@ -411,13 +410,13 @@ instance ScriptableComput (ComputEdh' a) where
   callByScript (ComputEdh' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d -> exitEdh ets exit $ FullyEffected d odEmpty []
+      else runEdhTx ets $
+        act $ \ !d -> exitEdhTx exit $ FullyEffected d odEmpty []
 
 -- | Wrap an Edh aware computation result as scripted
 --
 -- Use this form in case you can give out an 'EdhValue' directly
-newtype ComputEdh_
-  = ComputEdh_ (EdhThreadState -> (EdhValue -> STM ()) -> STM ())
+newtype ComputEdh_ = ComputEdh_ (EdhTxExit EdhValue -> EdhTx)
 
 instance ScriptableComput ComputEdh_ where
   scriptableArgs _ = []
@@ -425,14 +424,12 @@ instance ScriptableComput ComputEdh_ where
   callByScript (ComputEdh_ !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !v -> exitEdh ets exit $ ScriptDone v
+      else runEdhTx ets $ act $ \ !v -> exitEdhTx exit $ ScriptDone v
 
 -- | Wrap an Edh aware computation result as scripted, and you would give out
 -- one or more named results in addition, those can be separately obtained by
 -- the script at will
-data InflateEdh a
-  = Typeable a =>
-    InflateEdh (EdhThreadState -> (a -> KwArgs -> STM ()) -> STM ())
+data InflateEdh a = Typeable a => InflateEdh (EdhTxExit (a, KwArgs) -> EdhTx)
 
 instance ScriptableComput (InflateEdh a) where
   scriptableArgs _ = []
@@ -440,16 +437,16 @@ instance ScriptableComput (InflateEdh a) where
   callByScript (InflateEdh !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d !extras ->
-        exitEdh ets exit $ FullyEffected (toDyn d) extras []
+      else runEdhTx ets $
+        act $ \(!d, !extras) ->
+          exitEdhTx exit $ FullyEffected (toDyn d) extras []
 
 -- | Wrap an Edh aware computation result as scripted, and you would give out
 -- one or more named results in addition, those can be separately obtained by
 -- the script at will
 --
 -- Use this form in case you construct a 'Dynamic' result yourself
-newtype InflateEdh' a
-  = InflateEdh' (EdhThreadState -> (Dynamic -> KwArgs -> STM ()) -> STM ())
+newtype InflateEdh' a = InflateEdh' (EdhTxExit (Dynamic, KwArgs) -> EdhTx)
 
 instance ScriptableComput (InflateEdh' a) where
   scriptableArgs _ = []
@@ -457,8 +454,9 @@ instance ScriptableComput (InflateEdh' a) where
   callByScript (InflateEdh' !act) (ArgsPack !args !kwargs) !exit !ets =
     if not (null args) || not (odNull kwargs)
       then throwEdh ets UsageError "extranous arguments"
-      else act ets $ \ !d !extras ->
-        exitEdh ets exit $ FullyEffected d extras []
+      else runEdhTx ets $
+        act $ \(!d, !extras) ->
+          exitEdhTx exit $ FullyEffected d extras []
 
 -- | Wrap a general effectful computation in the 'IO' monad
 data ComputIO a = Typeable a => ComputIO (IO a)
@@ -726,6 +724,9 @@ instance Typeable t => ScriptArgAdapter (HostSeq t) where
             EdhObject o -> case edh'obj'store o of
               HostStore dd -> case fromDynamic dd of
                 Just (sr :: ScriptedResult) -> case sr of
+                  ScriptDone' d -> case fromDynamic d of
+                    Just (t :: t) -> go rest ((t, o) : rs)
+                    Nothing -> badElem ev
                   FullyEffected d _extras _applied -> case fromDynamic d of
                     Just (t :: t) -> go rest ((t, o) : rs)
                     Nothing -> badElem ev
@@ -739,6 +740,54 @@ instance Typeable t => ScriptArgAdapter (HostSeq t) where
   adaptedArgValue (HostSeq _vals !objs) =
     EdhArgsPack $ ArgsPack (EdhObject <$> objs) odEmpty
 
+data HostData (tn :: TypeLits.Symbol) = HostData !Dynamic !Object
+
+instance
+  TypeLits.KnownSymbol tn =>
+  ScriptArgAdapter (Maybe (HostData tn))
+  where
+  adaptedArgType = T.pack $ "Maybe " <> TypeLits.symbolVal (Proxy :: Proxy tn)
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhNil -> exitEdhTx exit Nothing
+    EdhObject o -> case edh'obj'store o of
+      HostStore dd -> case fromDynamic dd of
+        Just (sr :: ScriptedResult) -> case sr of
+          ScriptDone' d -> exitEdhTx exit $ Just $ HostData d o
+          FullyEffected d _extras _applied ->
+            exitEdhTx exit $ Just $ HostData d o
+          _ -> exitEdhTx exit $ Just $ HostData dd o
+        Nothing -> exitEdhTx exit $ Just $ HostData dd o
+      _ -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostData tn) <> " expected but given: " <> badDesc
+
+  adaptedArgValue (Just (HostData _dd !obj)) = EdhObject obj
+  adaptedArgValue Nothing = edhNothing
+
+instance TypeLits.KnownSymbol tn => ScriptArgAdapter (HostData tn) where
+  adaptedArgType = T.pack $ TypeLits.symbolVal (Proxy :: Proxy tn)
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhObject o -> case edh'obj'store o of
+      HostStore dd -> case fromDynamic dd of
+        Just (sr :: ScriptedResult) -> case sr of
+          ScriptDone' d -> exitEdhTx exit $ HostData d o
+          FullyEffected d _extras _applied -> exitEdhTx exit $ HostData d o
+          _ -> exitEdhTx exit $ HostData dd o
+        Nothing -> exitEdhTx exit $ HostData dd o
+      _ -> badVal
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostData tn) <> " expected but given: " <> badDesc
+
+  adaptedArgValue (HostData _dd !obj) = EdhObject obj
+
 data HostValue t = Typeable t => HostValue !t !Object
 
 instance Typeable t => ScriptArgAdapter (Maybe (HostValue t)) where
@@ -749,6 +798,9 @@ instance Typeable t => ScriptArgAdapter (Maybe (HostValue t)) where
     EdhObject o -> case edh'obj'store o of
       HostStore dd -> case fromDynamic dd of
         Just (sr :: ScriptedResult) -> case sr of
+          ScriptDone' d -> case fromDynamic d of
+            Just (t :: t) -> exitEdhTx exit $ Just $ HostValue t o
+            Nothing -> badVal
           FullyEffected d _extras _applied -> case fromDynamic d of
             Just (t :: t) -> exitEdhTx exit $ Just $ HostValue t o
             Nothing -> badVal
@@ -773,6 +825,9 @@ instance Typeable t => ScriptArgAdapter (HostValue t) where
     EdhObject o -> case edh'obj'store o of
       HostStore dd -> case fromDynamic dd of
         Just (sr :: ScriptedResult) -> case sr of
+          ScriptDone' d -> case fromDynamic d of
+            Just (t :: t) -> exitEdhTx exit $ HostValue t o
+            Nothing -> badVal
           FullyEffected d _extras _applied -> case fromDynamic d of
             Just (t :: t) -> exitEdhTx exit $ HostValue t o
             Nothing -> badVal
