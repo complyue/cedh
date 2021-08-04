@@ -1,5 +1,6 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Language.Edh.Curry.Comput where
 
@@ -606,35 +607,12 @@ instance ScriptArgAdapter Double where
           adaptedArgType @Double <> " expected but given: " <> badDesc
   adaptedArgValue = EdhDecimal . D.decimalFromRealFloat
 
-instance ScriptArgAdapter (Maybe Integer) where
-  adaptEdhArg !v !exit = case edhUltimate v of
-    EdhNil -> exitEdhTx exit Nothing
-    EdhDecimal !d -> case D.decimalToInteger d of
-      Just !i -> exitEdhTx exit $ Just i
-      Nothing -> badVal
-    _ -> badVal
-    where
-      badVal = edhValueDescTx v $ \ !badDesc ->
-        throwEdhTx UsageError $
-          "optional " <> adaptedArgType @Integer
-            <> " expected but given: "
-            <> badDesc
-  adaptedArgValue (Just !i) = EdhDecimal $ fromIntegral i
-  adaptedArgValue Nothing = edhNothing
-
-instance ScriptArgAdapter Integer where
-  adaptEdhArg !v !exit = case edhUltimate v of
-    EdhDecimal !d -> case D.decimalToInteger d of
-      Just !i -> exitEdhTx exit i
-      Nothing -> badVal
-    _ -> badVal
-    where
-      badVal = edhValueDescTx v $ \ !badDesc ->
-        throwEdhTx UsageError $
-          adaptedArgType @Integer <> " expected but given: " <> badDesc
-  adaptedArgValue !i = EdhDecimal $ fromIntegral i
-
-instance ScriptArgAdapter (Maybe Int) where
+instance
+  {-# OVERLAPPABLE #-}
+  forall i.
+  (Typeable i, Integral i) =>
+  ScriptArgAdapter (Maybe i)
+  where
   adaptEdhArg !v !exit = case edhUltimate v of
     EdhNil -> exitEdhTx exit Nothing
     EdhDecimal !d -> case D.decimalToInteger d of
@@ -644,13 +622,18 @@ instance ScriptArgAdapter (Maybe Int) where
     where
       badVal = edhValueDescTx v $ \ !badDesc ->
         throwEdhTx UsageError $
-          "optional " <> adaptedArgType @Int
+          "optional " <> adaptedArgType @i
             <> " expected but given: "
             <> badDesc
   adaptedArgValue (Just !i) = EdhDecimal $ fromIntegral i
   adaptedArgValue Nothing = edhNothing
 
-instance ScriptArgAdapter Int where
+instance
+  {-# OVERLAPPABLE #-}
+  forall i.
+  (Typeable i, Integral i) =>
+  ScriptArgAdapter i
+  where
   adaptEdhArg !v !exit = case edhUltimate v of
     EdhDecimal !d -> case D.decimalToInteger d of
       Just !i -> exitEdhTx exit $ fromInteger i
@@ -659,10 +642,11 @@ instance ScriptArgAdapter Int where
     where
       badVal = edhValueDescTx v $ \ !badDesc ->
         throwEdhTx UsageError $
-          adaptedArgType @Int <> " expected but given: " <> badDesc
+          adaptedArgType @i <> " expected but given: " <> badDesc
   adaptedArgValue !i = EdhDecimal $ fromIntegral i
 
 newtype Count = Count Int
+  deriving (Eq, Ord, Enum, Num, Real, Integral, Show)
 
 instance ScriptArgAdapter (Maybe Count) where
   adaptEdhArg !v !exit = case edhUltimate v of
@@ -693,52 +677,6 @@ instance ScriptArgAdapter Count where
             <> " (positive integer) expected but given: "
             <> badDesc
   adaptedArgValue (Count !i) = EdhDecimal $ fromIntegral i
-
-data HostSeq t = Typeable t => HostSeq ![t] ![Object]
-
-instance Typeable t => ScriptArgAdapter (HostSeq t) where
-  adaptedArgType = T.pack $ "[" <> show (typeRep @t) <> "]"
-
-  adaptEdhArg !v !exit = case edhUltimate v of
-    EdhArgsPack (ArgsPack !args !kwargs)
-      | odNull kwargs -> exitWith args
-    EdhList (List _u !lv) -> \ !ets ->
-      readTVar lv >>= \ !vs -> runEdhTx ets $ exitWith vs
-    _ -> badVal
-    where
-      badVal = edhValueDescTx v $ \ !badDesc ->
-        throwEdhTx UsageError $
-          adaptedArgType @(HostSeq t) <> " expected but given: " <> badDesc
-      badElem ev = edhValueDescTx ev $ \ !badDesc ->
-        throwEdhTx UsageError $
-          T.pack (show $ typeRep @t)
-            <> " element expected but given: "
-            <> badDesc
-      exitWith :: [EdhValue] -> EdhTx
-      exitWith [] = exitEdhTx exit $ HostSeq [] []
-      exitWith !vs = go vs []
-        where
-          go :: [EdhValue] -> [(t, Object)] -> EdhTx
-          go [] rs = exitEdhTx exit $ uncurry HostSeq $ unzip $ reverse rs
-          go (ev : rest) rs = case edhUltimate ev of
-            EdhObject o -> case edh'obj'store o of
-              HostStore dd -> case fromDynamic dd of
-                Just (sr :: ScriptedResult) -> case sr of
-                  ScriptDone' d -> case fromDynamic d of
-                    Just (t :: t) -> go rest ((t, o) : rs)
-                    Nothing -> badElem ev
-                  FullyEffected d _extras _applied -> case fromDynamic d of
-                    Just (t :: t) -> go rest ((t, o) : rs)
-                    Nothing -> badElem ev
-                  _ -> badElem ev
-                Nothing -> case fromDynamic dd of
-                  Just (t :: t) -> go rest ((t, o) : rs)
-                  Nothing -> badElem ev
-              _ -> badElem ev
-            _ -> badElem ev
-
-  adaptedArgValue (HostSeq _vals !objs) =
-    EdhArgsPack $ ArgsPack (EdhObject <$> objs) odEmpty
 
 data HostData (tn :: TypeLits.Symbol) = HostData !Dynamic !Object
 
@@ -843,6 +781,33 @@ instance Typeable t => ScriptArgAdapter (HostValue t) where
           adaptedArgType @(HostValue t) <> " expected but given: " <> badDesc
 
   adaptedArgValue (HostValue _val !obj) = EdhObject obj
+
+data HostSeq t = ScriptArgAdapter t => HostSeq ![t] ![Object]
+
+instance (Typeable t, ScriptArgAdapter t) => ScriptArgAdapter (HostSeq t) where
+  adaptedArgType = T.pack $ "[" <> show (typeRep @t) <> "]"
+
+  adaptEdhArg !v !exit = case edhUltimate v of
+    EdhArgsPack (ArgsPack !args !kwargs)
+      | odNull kwargs -> exitWith args
+    EdhList (List _u !lv) -> \ !ets ->
+      readTVar lv >>= \ !vs -> runEdhTx ets $ exitWith vs
+    _ -> badVal
+    where
+      badVal = edhValueDescTx v $ \ !badDesc ->
+        throwEdhTx UsageError $
+          adaptedArgType @(HostSeq t) <> " expected but given: " <> badDesc
+      exitWith :: [EdhValue] -> EdhTx
+      exitWith [] = exitEdhTx exit $ HostSeq [] []
+      exitWith !vs = go vs []
+        where
+          go :: [EdhValue] -> [(t, Object)] -> EdhTx
+          go [] rs = exitEdhTx exit $ uncurry HostSeq $ unzip $ reverse rs
+          go (ev : rest) rs = adaptEdhArg ev $
+            \(HostValue !t !o) -> go rest ((t, o) : rs)
+
+  adaptedArgValue (HostSeq _vals !objs) =
+    EdhArgsPack $ ArgsPack (EdhObject <$> objs) odEmpty
 
 -- * Utilities
 
