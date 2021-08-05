@@ -1,5 +1,4 @@
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE PatternSynonyms #-}
 
 module Language.Edh.Curry.Args
   ( ScriptArg (..),
@@ -7,7 +6,6 @@ module Language.Edh.Curry.Args
     scriptArgName,
     type (@:),
     type ($:),
-    pattern ComputArg,
     appliedArg,
     effectfulArg,
   )
@@ -30,11 +28,6 @@ newtype Effective a = Effective a
 type name @: a = ScriptArg a name
 
 type name $: a = ScriptArg (Effective a) name
-
-pattern ComputArg :: a -> name @: a
-pattern ComputArg a = ScriptArg a
-
-{-# COMPLETE ComputArg #-}
 
 appliedArg :: name @: a -> a
 appliedArg (ScriptArg a) = a
