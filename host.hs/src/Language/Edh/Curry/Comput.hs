@@ -877,7 +877,7 @@ effectfulArgWithDefaultCtor ::
   Typeable t =>
   EdhValue ->
   ScriptArg (Effective (Maybe (HostValue t))) name ->
-  EdhTxExit t ->
+  EdhTxExit (t, Object) ->
   EdhTx
 effectfulArgWithDefaultCtor = effectfulArgWithDefaultCtor' []
 
@@ -887,7 +887,7 @@ effectfulArgWithDefaultCtor' ::
   [EdhValue] ->
   EdhValue ->
   ScriptArg (Effective (Maybe (HostValue t))) name ->
-  EdhTxExit t ->
+  EdhTxExit (t, Object) ->
   EdhTx
 effectfulArgWithDefaultCtor' = flip effectfulArgWithDefaultCtor'' []
 
@@ -898,7 +898,7 @@ effectfulArgWithDefaultCtor'' ::
   [(AttrKey, EdhValue)] ->
   EdhValue ->
   ScriptArg (Effective (Maybe (HostValue t))) name ->
-  EdhTxExit t ->
+  EdhTxExit (t, Object) ->
   EdhTx
 effectfulArgWithDefaultCtor''
   !args
@@ -906,7 +906,7 @@ effectfulArgWithDefaultCtor''
   !callee
   (effectfulArg -> !maybeVal)
   !exit = case maybeVal of
-    Just (HostValue (t :: t) _obj) -> exitEdhTx exit t
+    Just (HostValue (t :: t) o) -> exitEdhTx exit (t, o)
     Nothing ->
       edhMakeCall' callee (ArgsPack args $ odFromList kwargs) $
         \ !val -> do
@@ -921,11 +921,11 @@ effectfulArgWithDefaultCtor''
               HostStore dd -> case fromDynamic dd of
                 Just (sr :: ScriptedResult) -> case sr of
                   FullyEffected d _extras _applied -> case fromDynamic d of
-                    Just (t :: t) -> exitEdhTx exit t
+                    Just (t :: t) -> exitEdhTx exit (t, o)
                     Nothing -> badArg
                   _ -> badArg
                 Nothing -> case fromDynamic dd of
-                  Just (t :: t) -> exitEdhTx exit t
+                  Just (t :: t) -> exitEdhTx exit (t, o)
                   Nothing -> badArg
               _ -> badArg
             _ -> badArg
